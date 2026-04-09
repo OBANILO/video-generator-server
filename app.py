@@ -21,7 +21,7 @@ os.makedirs(AUDIO_SEGMENTS_FOLDER, exist_ok=True)
 
 def download_file(url, dest_path):
     """Download a file from URL to local path."""
-    r = requests.get(url, timeout=60, stream=True)
+    r = requests.get(url, timeout=120, stream=True)
     r.raise_for_status()
     with open(dest_path, 'wb') as f:
         for chunk in r.iter_content(chunk_size=8192):
@@ -30,77 +30,35 @@ def download_file(url, dest_path):
 
 
 def generate_video_job(job_id, image_path, audio_path, output_path):
-    """Generate video from image + audio using FFmpeg with sparkle effects."""
+    """Generate video from image + audio using FFmpeg - simple and fast."""
     try:
         jobs[job_id]['status'] = 'processing'
 
-        # Get audio duration
-        result = subprocess.run([
-            'ffprobe', '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            audio_path
-        ], capture_output=True, text=True)
-        duration = float(result.stdout.strip())
-
-        # FFmpeg command: image + audio + sparkle particle overlay effect
+        # Simple fast FFmpeg: image + audio, no heavy effects
         ffmpeg_cmd = [
             'ffmpeg', '-y',
             '-loop', '1',
             '-i', image_path,
             '-i', audio_path,
-            '-filter_complex',
-            # Add sparkle/particle effect using geq filter + overlay
-            "[0:v]scale=1280:720,format=yuv420p,"
-            "geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)',"
-            # Vignette effect for cinematic look
-            "vignette=PI/4,"
-            # Add animated sparkles using noise
-            "noise=alls=8:allf=t+u[base];"
-            "[base]split[v1][v2];"
-            "[v1][v2]blend=all_expr='if(gt(random(0),0.997),255,A)'[sparkled]",
-            '-map', '[sparkled]',
-            '-map', '1:a',
             '-c:v', 'libx264',
-            '-preset', 'fast',
+            '-preset', 'ultrafast',
             '-crf', '23',
             '-c:a', 'aac',
             '-b:a', '192k',
-            '-t', str(duration),
             '-pix_fmt', 'yuv420p',
+            '-vf', 'scale=1280:720',
             '-shortest',
             output_path
         ]
 
-        proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=600)
+        proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=3600)
 
         if proc.returncode == 0 and os.path.exists(output_path):
             jobs[job_id]['status'] = 'completed'
-            jobs[job_id]['video_url'] = f"/videos/{job_id}.mp4"
+            jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
         else:
-            # Fallback: simple image+audio without effects
-            ffmpeg_simple = [
-                'ffmpeg', '-y',
-                '-loop', '1',
-                '-i', image_path,
-                '-i', audio_path,
-                '-c:v', 'libx264',
-                '-preset', 'fast',
-                '-crf', '23',
-                '-c:a', 'aac',
-                '-b:a', '192k',
-                '-pix_fmt', 'yuv420p',
-                '-vf', 'scale=1280:720',
-                '-shortest',
-                output_path
-            ]
-            proc2 = subprocess.run(ffmpeg_simple, capture_output=True, text=True, timeout=600)
-            if proc2.returncode == 0:
-                jobs[job_id]['status'] = 'completed'
-                jobs[job_id]['video_url'] = f"/videos/{job_id}.mp4"
-            else:
-                jobs[job_id]['status'] = 'error'
-                jobs[job_id]['error'] = proc2.stderr[-500:]
+            jobs[job_id]['status'] = 'error'
+            jobs[job_id]['error'] = proc.stderr[-500:]
 
     except Exception as e:
         jobs[job_id]['status'] = 'error'
@@ -161,7 +119,6 @@ def check_status(api_key):
 
     response = {'status': job['status']}
     if job['status'] == 'completed':
-        # Return full URL
         base_url = request.host_url.rstrip('/')
         response['video_url'] = base_url + f'/videos/{api_key}/{api_key}.mp4'
 
@@ -194,16 +151,14 @@ def process_audio():
     if not audio_url:
         return jsonify({'error': 'Missing url'}), 400
 
-    # Download audio
     session_id = str(uuid.uuid4())[:8]
     audio_path = os.path.join(AUDIO_SEGMENTS_FOLDER, f'{session_id}_input.mp3')
-    
+
     try:
         download_file(audio_url, audio_path)
     except Exception as e:
         return jsonify({'error': f'Download failed: {str(e)}'}), 500
 
-    # Get total duration
     result = subprocess.run([
         'ffprobe', '-v', 'error',
         '-show_entries', 'format=duration',
@@ -216,7 +171,6 @@ def process_audio():
     except:
         return jsonify({'error': 'Could not read audio duration'}), 500
 
-    # Split into segments
     segments = []
     start = 0
     seg_index = 0
@@ -242,7 +196,6 @@ def process_audio():
         start += segment_duration
         seg_index += 1
 
-    # Cleanup input file
     os.remove(audio_path)
 
     return jsonify({'segments': segments}), 200
