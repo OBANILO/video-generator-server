@@ -9,7 +9,6 @@ import json
 
 app = Flask(__name__)
 
-# Storage for job statuses
 jobs = {}
 
 UPLOAD_FOLDER = '/tmp/video_jobs'
@@ -20,7 +19,6 @@ os.makedirs(AUDIO_SEGMENTS_FOLDER, exist_ok=True)
 
 
 def download_file(url, dest_path):
-    """Download a file from URL to local path."""
     r = requests.get(url, timeout=120, stream=True)
     r.raise_for_status()
     with open(dest_path, 'wb') as f:
@@ -29,24 +27,50 @@ def download_file(url, dest_path):
     return dest_path
 
 
+def get_audio_duration(audio_path):
+    result = subprocess.run([
+        'ffprobe', '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        audio_path
+    ], capture_output=True, text=True)
+    return float(result.stdout.strip())
+
+
 def generate_video_job(job_id, image_path, audio_path, output_path):
-    """Generate video from image + audio using FFmpeg - simple and fast."""
     try:
         jobs[job_id]['status'] = 'processing'
 
-        # Simple fast FFmpeg: image + audio, no heavy effects
+        duration = get_audio_duration(audio_path)
+        frames = int(duration * 25)
+
+        zoom_filter = (
+            f"scale=8000:-1,"
+            f"zoompan="
+            f"z='min(zoom+0.0008,1.08)':"
+            f"x='iw/2-(iw/zoom/2)':"
+            f"y='ih/2-(ih/zoom/2)':"
+            f"d={frames}:"
+            f"s=1280x720:"
+            f"fps=25,"
+            f"fade=t=in:st=0:d=1.5,"
+            f"fade=t=out:st={duration-2}:d=2,"
+            f"format=yuv420p"
+        )
+
         ffmpeg_cmd = [
             'ffmpeg', '-y',
             '-loop', '1',
             '-i', image_path,
             '-i', audio_path,
+            '-vf', zoom_filter,
             '-c:v', 'libx264',
             '-preset', 'ultrafast',
             '-crf', '23',
             '-c:a', 'aac',
             '-b:a', '192k',
             '-pix_fmt', 'yuv420p',
-            '-vf', 'scale=1280:720',
+            '-t', str(duration),
             '-shortest',
             output_path
         ]
@@ -57,8 +81,30 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
             jobs[job_id]['status'] = 'completed'
             jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
         else:
-            jobs[job_id]['status'] = 'error'
-            jobs[job_id]['error'] = proc.stderr[-500:]
+            # Fallback: simple with fade only
+            ffmpeg_simple = [
+                'ffmpeg', '-y',
+                '-loop', '1',
+                '-i', image_path,
+                '-i', audio_path,
+                '-vf', f"scale=1280:720,fade=t=in:st=0:d=1.5,fade=t=out:st={duration-2}:d=2,format=yuv420p",
+                '-c:v', 'libx264',
+                '-preset', 'ultrafast',
+                '-crf', '23',
+                '-c:a', 'aac',
+                '-b:a', '192k',
+                '-pix_fmt', 'yuv420p',
+                '-t', str(duration),
+                '-shortest',
+                output_path
+            ]
+            proc2 = subprocess.run(ffmpeg_simple, capture_output=True, text=True, timeout=3600)
+            if proc2.returncode == 0 and os.path.exists(output_path):
+                jobs[job_id]['status'] = 'completed'
+                jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
+            else:
+                jobs[job_id]['status'] = 'error'
+                jobs[job_id]['error'] = proc2.stderr[-500:]
 
     except Exception as e:
         jobs[job_id]['status'] = 'error'
@@ -67,10 +113,6 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
 
 @app.route('/generate', methods=['POST'])
 def generate_video():
-    """
-    Receives: { audio_url, image_url, api_key }
-    Starts async video generation job.
-    """
     data = request.get_json()
     if not data:
         return jsonify({'error': 'No JSON data'}), 400
@@ -82,7 +124,6 @@ def generate_video():
     if not audio_url or not image_url:
         return jsonify({'error': 'Missing audio_url or image_url'}), 400
 
-    # Use api_key as job_id so plugin can check status
     job_id = api_key
     job_folder = os.path.join(UPLOAD_FOLDER, job_id)
     os.makedirs(job_folder, exist_ok=True)
@@ -93,7 +134,6 @@ def generate_video():
 
     jobs[job_id] = {'status': 'pending', 'video_url': None}
 
-    # Download files and generate video in background thread
     def run():
         try:
             download_file(image_url, image_path)
@@ -112,7 +152,6 @@ def generate_video():
 
 @app.route('/status/<api_key>', methods=['GET'])
 def check_status(api_key):
-    """Check the status of a video generation job."""
     job = jobs.get(api_key)
     if not job:
         return jsonify({'status': 'not_found'}), 200
@@ -130,17 +169,12 @@ def check_status(api_key):
 
 @app.route('/videos/<job_id>/<filename>', methods=['GET'])
 def serve_video(job_id, filename):
-    """Serve the generated video file."""
     folder = os.path.join(UPLOAD_FOLDER, job_id)
     return send_from_directory(folder, filename)
 
 
 @app.route('/process-audio', methods=['POST'])
 def process_audio():
-    """
-    Receives: { url, segment_duration, threshold }
-    Splits audio into segments and returns filenames.
-    """
     data = request.get_json()
     if not data:
         return jsonify({'error': 'No JSON data'}), 400
@@ -197,13 +231,11 @@ def process_audio():
         seg_index += 1
 
     os.remove(audio_path)
-
     return jsonify({'segments': segments}), 200
 
 
 @app.route('/audio_segments/<filename>', methods=['GET'])
 def serve_audio_segment(filename):
-    """Serve audio segment files."""
     return send_from_directory(AUDIO_SEGMENTS_FOLDER, filename)
 
 
