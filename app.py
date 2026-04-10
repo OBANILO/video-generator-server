@@ -19,7 +19,6 @@ os.makedirs(AUDIO_SEGMENTS_FOLDER, exist_ok=True)
 
 def download_file(url, dest_path):
     """Always download fresh - never use cache."""
-    # Add timestamp to URL to bypass any CDN/cache
     cache_bust = f"?nocache={int(time.time())}"
     full_url = url + cache_bust
     
@@ -30,8 +29,6 @@ def download_file(url, dest_path):
     }
     
     r = requests.get(full_url, timeout=120, stream=True, headers=headers)
-    
-    # If cache bust fails, try original URL
     if r.status_code != 200:
         r = requests.get(url, timeout=120, stream=True, headers=headers)
     
@@ -61,15 +58,36 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
         frames = int(duration * fps)
         fade_out_start = max(duration - 3, duration * 0.95)
 
-        zoom_filter = (
+        # FULL CINEMATIC EFFECT CHAIN:
+        # 1. Scale to working resolution
+        # 2. Ken Burns breathing zoom (in/out pulse)
+        # 3. Gentle sway (left/right + up/down)
+        # 4. Warm cinematic color grade (golden tones)
+        # 5. Vignette (dark edges, bright center)
+        # 6. Subtle film grain noise
+        # 7. Fade in + fade out
+
+        video_filter = (
+            # Step 1: Scale large enough for zoom without black borders
             f"scale=1920:1080,"
+            # Step 2+3: Ken Burns zoom pulse + gentle sway
             f"zoompan="
-            f"z='1.03+0.03*sin(on/200)':"
-            f"x='iw/2-(iw/zoom/2)':"
-            f"y='ih/2-(ih/zoom/2)':"
+            f"z='1.04+0.03*sin(on/200)':"
+            f"x='iw/2-(iw/zoom/2)+10*sin(on/150)':"
+            f"y='ih/2-(ih/zoom/2)+6*sin(on/180)':"
             f"d={frames}:"
             f"s=1280x720:"
             f"fps={fps},"
+            # Step 4: Warm cinematic color grade
+            f"curves="
+            f"r='0/0 0.3/0.35 0.7/0.75 1/1':"
+            f"g='0/0 0.3/0.28 0.7/0.68 1/0.95':"
+            f"b='0/0 0.3/0.22 0.7/0.58 1/0.85',"
+            # Step 5: Vignette effect
+            f"vignette=PI/4,"
+            # Step 6: Subtle film grain
+            f"noise=alls=4:allf=t,"
+            # Step 7: Fade in/out
             f"fade=t=in:st=0:d=2,"
             f"fade=t=out:st={fade_out_start:.2f}:d=3,"
             f"format=yuv420p"
@@ -80,10 +98,10 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
             '-loop', '1',
             '-i', image_path,
             '-i', audio_path,
-            '-vf', zoom_filter,
+            '-vf', video_filter,
             '-c:v', 'libx264',
             '-preset', 'ultrafast',
-            '-crf', '22',
+            '-crf', '20',
             '-c:a', 'aac',
             '-b:a', '192k',
             '-pix_fmt', 'yuv420p',
@@ -98,8 +116,15 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
             jobs[job_id]['status'] = 'completed'
             jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
         else:
-            simple_zoom = (
-                f"scale=1280:720,"
+            # Fallback: simple zoom + fade only
+            jobs[job_id]['error'] = proc.stderr[-300:]
+            simple_filter = (
+                f"scale=1920:1080,"
+                f"zoompan="
+                f"z='1.03+0.02*sin(on/200)':"
+                f"x='iw/2-(iw/zoom/2)':"
+                f"y='ih/2-(ih/zoom/2)':"
+                f"d={frames}:s=1280x720:fps={fps},"
                 f"fade=t=in:st=0:d=2,"
                 f"fade=t=out:st={fade_out_start:.2f}:d=3,"
                 f"format=yuv420p"
@@ -109,10 +134,10 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
                 '-loop', '1',
                 '-i', image_path,
                 '-i', audio_path,
-                '-vf', simple_zoom,
+                '-vf', simple_filter,
                 '-c:v', 'libx264',
                 '-preset', 'ultrafast',
-                '-crf', '22',
+                '-crf', '20',
                 '-c:a', 'aac',
                 '-b:a', '192k',
                 '-pix_fmt', 'yuv420p',
@@ -154,7 +179,6 @@ def generate_video():
     audio_path = os.path.join(job_folder, 'audio.mp3')
     output_path = os.path.join(job_folder, f'{job_id}.mp4')
 
-    # Always reset job status for fresh generation
     jobs[job_id] = {'status': 'pending', 'video_url': None}
 
     def run():
@@ -163,8 +187,6 @@ def generate_video():
             for f in [image_path, audio_path, output_path]:
                 if os.path.exists(f):
                     os.remove(f)
-            
-            # Download fresh files with cache busting
             download_file(image_url, image_path)
             download_file(audio_url, audio_path)
             generate_video_job(job_id, image_path, audio_path, output_path)
