@@ -4,6 +4,7 @@ import os
 import uuid
 import requests
 import threading
+import time
 
 app = Flask(__name__)
 
@@ -17,7 +18,23 @@ os.makedirs(AUDIO_SEGMENTS_FOLDER, exist_ok=True)
 
 
 def download_file(url, dest_path):
-    r = requests.get(url, timeout=120, stream=True)
+    """Always download fresh - never use cache."""
+    # Add timestamp to URL to bypass any CDN/cache
+    cache_bust = f"?nocache={int(time.time())}"
+    full_url = url + cache_bust
+    
+    headers = {
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+    }
+    
+    r = requests.get(full_url, timeout=120, stream=True, headers=headers)
+    
+    # If cache bust fails, try original URL
+    if r.status_code != 200:
+        r = requests.get(url, timeout=120, stream=True, headers=headers)
+    
     r.raise_for_status()
     with open(dest_path, 'wb') as f:
         for chunk in r.iter_content(chunk_size=8192):
@@ -44,8 +61,6 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
         frames = int(duration * fps)
         fade_out_start = max(duration - 3, duration * 0.95)
 
-        # Breathing zoom: zoom in and out every ~8 seconds using sine wave
-        # sin(on/200) oscillates smoothly - zoom goes 1.0 <-> 1.06 repeatedly
         zoom_filter = (
             f"scale=1920:1080,"
             f"zoompan="
@@ -68,7 +83,7 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
             '-vf', zoom_filter,
             '-c:v', 'libx264',
             '-preset', 'ultrafast',
-            '-crf', '20',
+            '-crf', '22',
             '-c:a', 'aac',
             '-b:a', '192k',
             '-pix_fmt', 'yuv420p',
@@ -83,15 +98,8 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
             jobs[job_id]['status'] = 'completed'
             jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
         else:
-            # Fallback: simple zoom in/out without color grade
-            jobs[job_id]['error'] = proc.stderr[-300:]
             simple_zoom = (
-                f"scale=1920:1080,"
-                f"zoompan="
-                f"z='1.02+0.02*sin(on/200)':"
-                f"x='iw/2-(iw/zoom/2)':"
-                f"y='ih/2-(ih/zoom/2)':"
-                f"d={frames}:s=1280x720:fps={fps},"
+                f"scale=1280:720,"
                 f"fade=t=in:st=0:d=2,"
                 f"fade=t=out:st={fade_out_start:.2f}:d=3,"
                 f"format=yuv420p"
@@ -104,7 +112,7 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
                 '-vf', simple_zoom,
                 '-c:v', 'libx264',
                 '-preset', 'ultrafast',
-                '-crf', '20',
+                '-crf', '22',
                 '-c:a', 'aac',
                 '-b:a', '192k',
                 '-pix_fmt', 'yuv420p',
@@ -146,14 +154,17 @@ def generate_video():
     audio_path = os.path.join(job_folder, 'audio.mp3')
     output_path = os.path.join(job_folder, f'{job_id}.mp4')
 
+    # Always reset job status for fresh generation
     jobs[job_id] = {'status': 'pending', 'video_url': None}
 
     def run():
         try:
-            # Always delete old files to force fresh download
+            # Always delete old files first
             for f in [image_path, audio_path, output_path]:
                 if os.path.exists(f):
                     os.remove(f)
+            
+            # Download fresh files with cache busting
             download_file(image_url, image_path)
             download_file(audio_url, audio_path)
             generate_video_job(job_id, image_path, audio_path, output_path)
@@ -189,6 +200,23 @@ def check_status(api_key):
 def serve_video(job_id, filename):
     folder = os.path.join(UPLOAD_FOLDER, job_id)
     return send_from_directory(folder, filename)
+
+
+@app.route('/clear-cache', methods=['POST'])
+def clear_cache():
+    data = request.get_json()
+    api_key = data.get('api_key') if data else None
+
+    if api_key and api_key in jobs:
+        del jobs[api_key]
+
+    if api_key:
+        import shutil
+        job_folder = os.path.join(UPLOAD_FOLDER, api_key)
+        if os.path.exists(job_folder):
+            shutil.rmtree(job_folder, ignore_errors=True)
+
+    return jsonify({'status': 'cleared'}), 200
 
 
 @app.route('/process-audio', methods=['POST'])
@@ -257,30 +285,11 @@ def serve_audio_segment(filename):
     return send_from_directory(AUDIO_SEGMENTS_FOLDER, filename)
 
 
-@app.route('/clear-cache', methods=['POST'])
-def clear_cache():
-    """Clear all cached video jobs for a specific api_key."""
-    data = request.get_json()
-    api_key = data.get('api_key') if data else None
-
-    if api_key and api_key in jobs:
-        del jobs[api_key]
-
-    # Delete files from disk
-    if api_key:
-        import shutil
-        job_folder = os.path.join(UPLOAD_FOLDER, api_key)
-        if os.path.exists(job_folder):
-            shutil.rmtree(job_folder, ignore_errors=True)
-
-    return jsonify({'status': 'cleared'}), 200
-
-
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'ok', 'message': 'Video server running'}), 200
 
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 80))
+    port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, debug=False)
