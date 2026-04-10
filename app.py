@@ -150,6 +150,10 @@ def generate_video():
 
     def run():
         try:
+            # Always delete old files to force fresh download
+            for f in [image_path, audio_path, output_path]:
+                if os.path.exists(f):
+                    os.remove(f)
             download_file(image_url, image_path)
             download_file(audio_url, audio_path)
             generate_video_job(job_id, image_path, audio_path, output_path)
