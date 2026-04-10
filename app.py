@@ -47,25 +47,178 @@ def get_audio_duration(audio_path):
 
 def get_best_font():
     """Find best available font — prefer serif for VIP luxury look."""
-    serif_candidates = [
+    candidates = [
         '/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf',
         '/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf',
         '/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf',
         '/usr/share/fonts/truetype/noto/NotoSerif-Bold.ttf',
-    ]
-    sans_candidates = [
         '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
         '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
         '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
         '/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf',
     ]
-    for path in serif_candidates + sans_candidates:
+    for path in candidates:
         if os.path.exists(path):
             return path
-    result = subprocess.run(['fc-match', '-f', '%{file}', 'serif:bold'], capture_output=True, text=True)
+    result = subprocess.run(
+        ['fc-match', '-f', '%{file}', 'serif:bold'],
+        capture_output=True, text=True
+    )
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
-    return sans_candidates[0]
+    return candidates[-1]
+
+
+def build_video_filter(duration, fps, font):
+    frames      = int(duration * fps)
+    fade_out_st = max(duration - 3, duration * 0.85)
+
+    # ── SLOW LINEAR ZOOM (keyframe style) ──────────────────────────────────────
+    # Zoom from 1.00 → 1.08 across entire clip duration. Per-frame increment is
+    # tiny so motion is imperceptible second-to-second — cinematic slow zoom.
+    z_inc = 0.08 / max(frames, 1)
+
+    zoom_filter = (
+        f"scale=3840:2160:flags=lanczos,"
+        f"zoompan="
+        f"z='min(1.00+{z_inc:.8f}*on,1.08)':"
+        f"x='iw/2-(iw/zoom/2)':"
+        f"y='ih/2-(ih/zoom/2)':"
+        f"d={frames}:"
+        f"s=1280x720:"
+        f"fps={fps}"
+    )
+
+    # ── WARM GRADE + VIGNETTE + GRAIN ──────────────────────────────────────────
+    grade_filter = (
+        f"curves="
+        f"r='0/0 0.5/0.52 1/1':"
+        f"g='0/0 0.5/0.49 1/0.96':"
+        f"b='0/0 0.5/0.44 1/0.88',"
+        f"vignette=PI/5,"
+        f"noise=alls=2:allf=t"
+    )
+
+    # ── FADE IN / OUT ──────────────────────────────────────────────────────────
+    fade_filter = (
+        f"fade=t=in:st=0:d=2,"
+        f"fade=t=out:st={fade_out_st:.2f}:d=3"
+    )
+
+    # ── VIP WATERMARK — top right ──────────────────────────────────────────────
+    # Layout:
+    #   ─────────── (thin gold line, y=16)
+    #    SORLUNE    (serif gold glowing text, y=26)
+    #   ─────────── (thin gold line, y=52)
+    #
+    # Lines: rendered as drawtext with space chars + gold box background
+    # This is more reliable than drawbox across FFmpeg versions.
+    m = 20   # right margin
+    # Top gold line
+    top_line = (
+        f"drawtext="
+        f"fontfile={font}:"
+        f"text='                        ':"
+        f"fontsize=7:"
+        f"fontcolor=0xD4AF37@0:"
+        f"box=1:boxcolor=0xD4AF37@0.85:boxborderw=0:"
+        f"x=w-tw-{m}:y=16"
+    )
+    # Bottom gold line
+    bot_line = (
+        f"drawtext="
+        f"fontfile={font}:"
+        f"text='                        ':"
+        f"fontsize=7:"
+        f"fontcolor=0xD4AF37@0:"
+        f"box=1:boxcolor=0xD4AF37@0.85:boxborderw=0:"
+        f"x=w-tw-{m}:y=52"
+    )
+    # Glow layer (slightly brighter, low alpha, same position)
+    glow_text = (
+        f"drawtext="
+        f"fontfile={font}:"
+        f"text='SORLUNE':"
+        f"fontsize=25:"
+        f"fontcolor=0xF5E080@0.22:"
+        f"x=w-tw-{m}:y=27:"
+        f"shadowcolor=0xD4AF37@0.35:shadowx=0:shadowy=0"
+    )
+    # Main crisp gold text
+    main_text = (
+        f"drawtext="
+        f"fontfile={font}:"
+        f"text='SORLUNE':"
+        f"fontsize=22:"
+        f"fontcolor=0xD4AF37@0.97:"
+        f"x=w-tw-{m}:y=28:"
+        f"shadowcolor=0x000000@0.95:shadowx=1:shadowy=1"
+    )
+
+    watermark_filter = f"{top_line},{bot_line},{glow_text},{main_text}"
+
+    # ── CENTERED EQUALIZER BARS — bottom center ────────────────────────────────
+    # 11 thin vertical bars, gold, animated via sin() at different speeds/phases
+    # Each bar: drawtext with '|' char, fontsize expression = base + amp*|sin(t*f+p)|
+    # Bars are symmetric (mirror left/right of center) for VIP look
+    # fontsize drives height; y adjusts so bars are bottom-anchored
+
+    bar_count  = 11
+    bar_gap    = 14      # px between bar centers
+    bar_base   = 6       # min fontsize (min bar height)
+    bar_amp    = 26      # max extra height
+    bottom_y   = 30      # px from bottom of frame
+
+    # Symmetric frequencies + phases (mirror around center bar)
+    bars_params = [
+        (1.7, 0.0),
+        (2.3, 0.6),
+        (2.9, 1.1),
+        (2.1, 1.6),
+        (3.3, 0.4),
+        (2.6, 0.9),   # center
+        (3.3, 0.4),
+        (2.1, 1.6),
+        (2.9, 1.1),
+        (2.3, 0.6),
+        (1.7, 0.0),
+    ]
+
+    half_w    = (bar_count - 1) * bar_gap // 2
+    eq_parts  = []
+
+    for i, (freq, phase) in enumerate(bars_params):
+        offset = -half_w + i * bar_gap
+        # x: center of video + offset - half char width (~4px for '|')
+        bar_x  = f"(w/2+({offset})-tw/2)"
+        fs_expr = f"{bar_base}+{bar_amp}*abs(sin(t*{freq}+{phase}))"
+        # y: bottom-anchor — bar bottom stays fixed at (h - bottom_y)
+        bar_y  = f"(h-{bottom_y}-({bar_base}+{bar_amp}*abs(sin(t*{freq}+{phase}))))"
+
+        eq_part = (
+            f"drawtext="
+            f"fontfile={font}:"
+            f"text='|':"
+            f"fontsize='{fs_expr}':"
+            f"fontcolor=0xC9A840@0.40:"
+            f"x={bar_x}:"
+            f"y={bar_y}"
+        )
+        eq_parts.append(eq_part)
+
+    eq_filter = ",".join(eq_parts)
+
+    # ── COMBINE ALL ────────────────────────────────────────────────────────────
+    full_filter = (
+        f"{zoom_filter},"
+        f"{grade_filter},"
+        f"{fade_filter},"
+        f"format=yuv420p,"
+        f"{watermark_filter},"
+        f"{eq_filter}"
+    )
+
+    return full_filter
 
 
 def generate_video_job(job_id, image_path, audio_path, output_path):
@@ -73,38 +226,12 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
         jobs[job_id]['status'] = 'processing'
 
         duration = get_audio_duration(audio_path)
-        fps = 25
-        frames = int(duration * fps)
-        fade_out_start = max(duration - 3, duration * 0.85)
-        font = get_best_font()
+        fps      = 25
+        font     = get_best_font()
 
-        # 6-second breathing pulse cycle
-        cycle_frames = fps * 6
+        video_filter = build_video_filter(duration, fps, font)
 
-        # ── STEP 1: Base video — breathing pulse zoom + warm grade ─────────────
-        temp_output = output_path + '_temp.mp4'
-
-        video_filter = (
-            f"scale=1920:1080:flags=lanczos,"
-            f"zoompan="
-            f"z='1.02+0.03*sin(2*PI*on/{cycle_frames})':"
-            f"x='iw/2-(iw/zoom/2)':"
-            f"y='ih/2-(ih/zoom/2)':"
-            f"d={frames}:"
-            f"s=1280x720:"
-            f"fps={fps},"
-            f"curves="
-            f"r='0/0 0.5/0.52 1/1':"
-            f"g='0/0 0.5/0.49 1/0.96':"
-            f"b='0/0 0.5/0.44 1/0.88',"
-            f"vignette=PI/5,"
-            f"noise=alls=2:allf=t,"
-            f"fade=t=in:st=0:d=2,"
-            f"fade=t=out:st={fade_out_start:.2f}:d=3,"
-            f"format=yuv420p"
-        )
-
-        ffmpeg_step1 = [
+        ffmpeg_cmd = [
             'ffmpeg', '-y',
             '-loop', '1',
             '-i', image_path,
@@ -118,107 +245,45 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
             '-pix_fmt', 'yuv420p',
             '-t', str(duration),
             '-shortest',
-            temp_output
+            output_path
         ]
 
-        proc1 = subprocess.run(ffmpeg_step1, capture_output=True, text=True, timeout=3600)
+        proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=3600)
 
-        if proc1.returncode == 0 and os.path.exists(temp_output):
-
-            # ── STEP 2: VIP watermark — glowing gold serif, top right ──────────
-            # Layout:  thin gold line / SORLUNE / thin gold line
-            # All positioned in top-right corner with 22px margin
-            line_w = 200
-            margin = 22
-            line_x = f"w-{line_w}-{margin}"
-            text_y = 24
-
-            watermark_filter = (
-                # Top gold rule
-                f"drawbox="
-                f"x={line_x}:y=14:w={line_w}:h=1:"
-                f"color=0xD4AF37@0.8:t=fill,"
-                # Bottom gold rule
-                f"drawbox="
-                f"x={line_x}:y=50:w={line_w}:h=1:"
-                f"color=0xD4AF37@0.8:t=fill,"
-                # Glow layer — same text, brighter, slightly larger, behind
-                f"drawtext="
-                f"text='SORLUNE':"
-                f"fontfile={font}:"
-                f"fontsize=23:"
-                f"fontcolor=0xF0D060@0.3:"
-                f"x=w-tw-{margin}:y={text_y}:"
-                f"shadowcolor=0xD4AF37@0.6:"
-                f"shadowx=0:shadowy=0,"
-                # Main text — crisp gold
-                f"drawtext="
-                f"text='SORLUNE':"
-                f"fontfile={font}:"
-                f"fontsize=22:"
-                f"fontcolor=0xD4AF37@0.95:"
-                f"x=w-tw-{margin}:y={text_y}:"
-                f"shadowcolor=0x000000@0.9:"
-                f"shadowx=1:shadowy=1"
-            )
-
-            ffmpeg_step2 = [
-                'ffmpeg', '-y',
-                '-i', temp_output,
-                '-vf', watermark_filter,
-                '-c:v', 'libx264',
-                '-preset', 'ultrafast',
-                '-crf', '20',
-                '-c:a', 'copy',
-                output_path
-            ]
-
-            proc2 = subprocess.run(ffmpeg_step2, capture_output=True, text=True, timeout=600)
-
-            if os.path.exists(temp_output):
-                os.remove(temp_output)
-
-            if proc2.returncode == 0 and os.path.exists(output_path):
-                jobs[job_id]['status'] = 'completed'
-                jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
-            else:
-                # Watermark step failed — serve animated video without it
-                import shutil
-                if os.path.exists(temp_output):
-                    shutil.move(temp_output, output_path)
-                jobs[job_id]['status'] = 'completed'
-                jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
-
+        if proc.returncode == 0 and os.path.exists(output_path):
+            jobs[job_id]['status'] = 'completed'
+            jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
         else:
-            # ── FALLBACK: one-pass zoom + watermark ───────────────────────────
-            jobs[job_id]['error'] = proc1.stderr[-300:]
-            simple_filter = (
+            # ── FALLBACK: bare-minimum filter ──────────────────────────────────
+            jobs[job_id]['error'] = proc.stderr[-500:]
+            frames  = int(duration * fps)
+            z_inc   = 0.08 / max(frames, 1)
+            fade_st = max(duration - 3, duration * 0.85)
+
+            fallback_filter = (
                 f"scale=1920:1080:flags=lanczos,"
                 f"zoompan="
-                f"z='1.02+0.03*sin(2*PI*on/{cycle_frames})':"
+                f"z='min(1.00+{z_inc:.8f}*on,1.08)':"
                 f"x='iw/2-(iw/zoom/2)':"
                 f"y='ih/2-(ih/zoom/2)':"
                 f"d={frames}:s=1280x720:fps={fps},"
                 f"fade=t=in:st=0:d=2,"
-                f"fade=t=out:st={fade_out_start:.2f}:d=3,"
-                f"drawbox=x=w-222:y=14:w=200:h=1:color=0xD4AF37@0.8:t=fill,"
-                f"drawbox=x=w-222:y=50:w=200:h=1:color=0xD4AF37@0.8:t=fill,"
+                f"fade=t=out:st={fade_st:.2f}:d=3,"
                 f"drawtext="
-                f"text='SORLUNE':"
                 f"fontfile={font}:"
+                f"text='SORLUNE':"
                 f"fontsize=22:"
-                f"fontcolor=0xD4AF37@0.95:"
-                f"x=w-tw-22:y=24:"
-                f"shadowcolor=0x000000@0.9:"
-                f"shadowx=1:shadowy=1,"
+                f"fontcolor=0xD4AF37@0.97:"
+                f"x=w-tw-20:y=28:"
+                f"shadowcolor=0x000000@0.95:shadowx=1:shadowy=1,"
                 f"format=yuv420p"
             )
-            ffmpeg_fallback = [
+            ffmpeg_fb = [
                 'ffmpeg', '-y',
                 '-loop', '1',
                 '-i', image_path,
                 '-i', audio_path,
-                '-vf', simple_filter,
+                '-vf', fallback_filter,
                 '-c:v', 'libx264',
                 '-preset', 'ultrafast',
                 '-crf', '20',
@@ -229,7 +294,7 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
                 '-shortest',
                 output_path
             ]
-            proc_fb = subprocess.run(ffmpeg_fallback, capture_output=True, text=True, timeout=3600)
+            proc_fb = subprocess.run(ffmpeg_fb, capture_output=True, text=True, timeout=3600)
             if proc_fb.returncode == 0 and os.path.exists(output_path):
                 jobs[job_id]['status'] = 'completed'
                 jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
@@ -250,17 +315,17 @@ def generate_video():
 
     audio_url = data.get('audio_url')
     image_url = data.get('image_url')
-    api_key = data.get('api_key', 'default')
+    api_key   = data.get('api_key', 'default')
 
     if not audio_url or not image_url:
         return jsonify({'error': 'Missing audio_url or image_url'}), 400
 
-    job_id = api_key
+    job_id     = api_key
     job_folder = os.path.join(UPLOAD_FOLDER, job_id)
     os.makedirs(job_folder, exist_ok=True)
 
-    image_path = os.path.join(job_folder, 'image.jpg')
-    audio_path = os.path.join(job_folder, 'audio.mp3')
+    image_path  = os.path.join(job_folder, 'image.jpg')
+    audio_path  = os.path.join(job_folder, 'audio.mp3')
     output_path = os.path.join(job_folder, f'{job_id}.mp4')
 
     jobs[job_id] = {'status': 'pending', 'video_url': None}
@@ -309,7 +374,7 @@ def serve_video(job_id, filename):
 
 @app.route('/clear-cache', methods=['POST'])
 def clear_cache():
-    data = request.get_json()
+    data    = request.get_json()
     api_key = data.get('api_key') if data else None
     if api_key and api_key in jobs:
         del jobs[api_key]
@@ -327,7 +392,7 @@ def process_audio():
     if not data:
         return jsonify({'error': 'No JSON data'}), 400
 
-    audio_url = data.get('url')
+    audio_url        = data.get('url')
     segment_duration = int(data.get('segment_duration', 60))
 
     if not audio_url:
@@ -350,16 +415,16 @@ def process_audio():
 
     try:
         total_duration = float(result.stdout.strip())
-    except:
+    except Exception:
         return jsonify({'error': 'Could not read audio duration'}), 500
 
-    segments = []
-    start = 0
+    segments  = []
+    start     = 0
     seg_index = 0
 
     while start < total_duration:
         seg_filename = f'{session_id}_seg{seg_index:03d}.mp3'
-        seg_path = os.path.join(AUDIO_SEGMENTS_FOLDER, seg_filename)
+        seg_path     = os.path.join(AUDIO_SEGMENTS_FOLDER, seg_filename)
 
         ffmpeg_cmd = [
             'ffmpeg', '-y',
@@ -375,7 +440,7 @@ def process_audio():
         if proc.returncode == 0 and os.path.exists(seg_path):
             segments.append(seg_filename)
 
-        start += segment_duration
+        start     += segment_duration
         seg_index += 1
 
     os.remove(audio_path)
