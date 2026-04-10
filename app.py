@@ -40,31 +40,28 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
         jobs[job_id]['status'] = 'processing'
 
         duration = get_audio_duration(audio_path)
-        frames = int(duration * 25)
+        fps = 25
+        frames = int(duration * fps)
         fade_out_start = max(duration - 3, duration * 0.95)
 
-        # Full video Ken Burns:
-        # - Alternates zoom in and zoom out every 30 seconds
-        # - Slow continuous pan left/right
-        # - Fade in at start, fade out at end
-        # - Light pulse effect using curves to simulate breathing light
+        # Breathing zoom: zoom in and out every ~8 seconds using sine wave
+        # sin(on/200) oscillates smoothly - zoom goes 1.0 <-> 1.06 repeatedly
         zoom_filter = (
-            # Scale image large enough for zoom+pan without black borders
-            f"scale=9000:-1,"
-            # Ken Burns: continuous slow zoom in over full duration
+            f"scale=5000:-1,"
             f"zoompan="
-            f"z='if(lte(zoom,1.0),1.0,zoom)+0.0004':"  # smooth continuous zoom
-            f"x='iw/2-(iw/zoom/2)+sin(on/250)*20':"    # gentle horizontal sway
-            f"y='ih/2-(ih/zoom/2)+cos(on/300)*10':"    # gentle vertical sway
+            f"z='1.03+0.03*sin(on/{fps*8}*PI)':"   # breathing zoom in/out every 8 sec
+            f"x='iw/2-(iw/zoom/2)+15*sin(on/{fps*12}*PI)':"  # gentle horizontal drift
+            f"y='ih/2-(ih/zoom/2)+8*sin(on/{fps*16}*PI)':"   # gentle vertical drift
             f"d={frames}:"
             f"s=1280x720:"
-            f"fps=25,"
-            # Fade in 2 seconds
+            f"fps={fps},"
+            # Warm cinematic color grade
+            f"curves=r='0/0 0.5/0.55 1/1':g='0/0 0.5/0.48 1/0.95':b='0/0 0.5/0.42 1/0.85',"
+            # Soft vignette
+            f"vignette=PI/5,"
+            # Fade in/out
             f"fade=t=in:st=0:d=2,"
-            # Fade out 3 seconds before end
             f"fade=t=out:st={fade_out_start:.2f}:d=3,"
-            # Slight vignette for cinematic look using curves
-            f"curves=r='0/0 0.5/0.45 1/1':g='0/0 0.5/0.45 1/1':b='0/0 0.5/0.45 1/1',"
             f"format=yuv420p"
         )
 
@@ -76,7 +73,7 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
             '-vf', zoom_filter,
             '-c:v', 'libx264',
             '-preset', 'ultrafast',
-            '-crf', '22',
+            '-crf', '20',
             '-c:a', 'aac',
             '-b:a', '192k',
             '-pix_fmt', 'yuv420p',
@@ -91,11 +88,15 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
             jobs[job_id]['status'] = 'completed'
             jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
         else:
-            # Fallback with basic zoom only
+            # Fallback: simple zoom in/out without color grade
             jobs[job_id]['error'] = proc.stderr[-300:]
-            fade_filter = (
+            simple_zoom = (
                 f"scale=4000:-1,"
-                f"zoompan=z='min(zoom+0.0003,1.05)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s=1280x720:fps=25,"
+                f"zoompan="
+                f"z='1.02+0.02*sin(on/200*PI)':"
+                f"x='iw/2-(iw/zoom/2)':"
+                f"y='ih/2-(ih/zoom/2)':"
+                f"d={frames}:s=1280x720:fps={fps},"
                 f"fade=t=in:st=0:d=2,"
                 f"fade=t=out:st={fade_out_start:.2f}:d=3,"
                 f"format=yuv420p"
@@ -105,10 +106,10 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
                 '-loop', '1',
                 '-i', image_path,
                 '-i', audio_path,
-                '-vf', fade_filter,
+                '-vf', simple_zoom,
                 '-c:v', 'libx264',
                 '-preset', 'ultrafast',
-                '-crf', '22',
+                '-crf', '20',
                 '-c:a', 'aac',
                 '-b:a', '192k',
                 '-pix_fmt', 'yuv420p',
