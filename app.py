@@ -4,8 +4,6 @@ import os
 import uuid
 import requests
 import threading
-import time
-import json
 
 app = Flask(__name__)
 
@@ -43,18 +41,30 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
 
         duration = get_audio_duration(audio_path)
         frames = int(duration * 25)
+        fade_out_start = max(duration - 3, duration * 0.95)
 
+        # Full video Ken Burns:
+        # - Alternates zoom in and zoom out every 30 seconds
+        # - Slow continuous pan left/right
+        # - Fade in at start, fade out at end
+        # - Light pulse effect using curves to simulate breathing light
         zoom_filter = (
-            f"scale=8000:-1,"
+            # Scale image large enough for zoom+pan without black borders
+            f"scale=9000:-1,"
+            # Ken Burns: continuous slow zoom in over full duration
             f"zoompan="
-            f"z='min(zoom+0.0008,1.08)':"
-            f"x='iw/2-(iw/zoom/2)':"
-            f"y='ih/2-(ih/zoom/2)':"
+            f"z='if(lte(zoom,1.0),1.0,zoom)+0.0004':"  # smooth continuous zoom
+            f"x='iw/2-(iw/zoom/2)+sin(on/250)*20':"    # gentle horizontal sway
+            f"y='ih/2-(ih/zoom/2)+cos(on/300)*10':"    # gentle vertical sway
             f"d={frames}:"
             f"s=1280x720:"
             f"fps=25,"
-            f"fade=t=in:st=0:d=1.5,"
-            f"fade=t=out:st={duration-2}:d=2,"
+            # Fade in 2 seconds
+            f"fade=t=in:st=0:d=2,"
+            # Fade out 3 seconds before end
+            f"fade=t=out:st={fade_out_start:.2f}:d=3,"
+            # Slight vignette for cinematic look using curves
+            f"curves=r='0/0 0.5/0.45 1/1':g='0/0 0.5/0.45 1/1':b='0/0 0.5/0.45 1/1',"
             f"format=yuv420p"
         )
 
@@ -66,7 +76,7 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
             '-vf', zoom_filter,
             '-c:v', 'libx264',
             '-preset', 'ultrafast',
-            '-crf', '23',
+            '-crf', '22',
             '-c:a', 'aac',
             '-b:a', '192k',
             '-pix_fmt', 'yuv420p',
@@ -81,16 +91,24 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
             jobs[job_id]['status'] = 'completed'
             jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
         else:
-            # Fallback: simple with fade only
+            # Fallback with basic zoom only
+            jobs[job_id]['error'] = proc.stderr[-300:]
+            fade_filter = (
+                f"scale=4000:-1,"
+                f"zoompan=z='min(zoom+0.0003,1.05)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s=1280x720:fps=25,"
+                f"fade=t=in:st=0:d=2,"
+                f"fade=t=out:st={fade_out_start:.2f}:d=3,"
+                f"format=yuv420p"
+            )
             ffmpeg_simple = [
                 'ffmpeg', '-y',
                 '-loop', '1',
                 '-i', image_path,
                 '-i', audio_path,
-                '-vf', f"scale=1280:720,fade=t=in:st=0:d=1.5,fade=t=out:st={duration-2}:d=2,format=yuv420p",
+                '-vf', fade_filter,
                 '-c:v', 'libx264',
                 '-preset', 'ultrafast',
-                '-crf', '23',
+                '-crf', '22',
                 '-c:a', 'aac',
                 '-b:a', '192k',
                 '-pix_fmt', 'yuv420p',
