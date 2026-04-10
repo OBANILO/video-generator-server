@@ -258,6 +258,25 @@ def serve_audio_segment(filename):
     return send_from_directory(AUDIO_SEGMENTS_FOLDER, filename)
 
 
+@app.route('/clear-cache', methods=['POST'])
+def clear_cache():
+    """Clear all cached video jobs for a specific api_key."""
+    data = request.get_json()
+    api_key = data.get('api_key') if data else None
+
+    if api_key and api_key in jobs:
+        del jobs[api_key]
+
+    # Delete files from disk
+    if api_key:
+        import shutil
+        job_folder = os.path.join(UPLOAD_FOLDER, api_key)
+        if os.path.exists(job_folder):
+            shutil.rmtree(job_folder, ignore_errors=True)
+
+    return jsonify({'status': 'cleared'}), 200
+
+
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'ok', 'message': 'Video server running'}), 200
