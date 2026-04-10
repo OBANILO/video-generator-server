@@ -47,19 +47,14 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
         # Breathing zoom: zoom in and out every ~8 seconds using sine wave
         # sin(on/200) oscillates smoothly - zoom goes 1.0 <-> 1.06 repeatedly
         zoom_filter = (
-            f"scale=5000:-1,"
+            f"scale=1920:1080,"
             f"zoompan="
-            f"z='1.03+0.03*sin(on/{fps*8}*PI)':"   # breathing zoom in/out every 8 sec
-            f"x='iw/2-(iw/zoom/2)+15*sin(on/{fps*12}*PI)':"  # gentle horizontal drift
-            f"y='ih/2-(ih/zoom/2)+8*sin(on/{fps*16}*PI)':"   # gentle vertical drift
+            f"z='1.03+0.03*sin(on/200)':"
+            f"x='iw/2-(iw/zoom/2)':"
+            f"y='ih/2-(ih/zoom/2)':"
             f"d={frames}:"
             f"s=1280x720:"
             f"fps={fps},"
-            # Warm cinematic color grade
-            f"curves=r='0/0 0.5/0.55 1/1':g='0/0 0.5/0.48 1/0.95':b='0/0 0.5/0.42 1/0.85',"
-            # Soft vignette
-            f"vignette=PI/5,"
-            # Fade in/out
             f"fade=t=in:st=0:d=2,"
             f"fade=t=out:st={fade_out_start:.2f}:d=3,"
             f"format=yuv420p"
@@ -91,9 +86,9 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
             # Fallback: simple zoom in/out without color grade
             jobs[job_id]['error'] = proc.stderr[-300:]
             simple_zoom = (
-                f"scale=4000:-1,"
+                f"scale=1920:1080,"
                 f"zoompan="
-                f"z='1.02+0.02*sin(on/200*PI)':"
+                f"z='1.02+0.02*sin(on/200)':"
                 f"x='iw/2-(iw/zoom/2)':"
                 f"y='ih/2-(ih/zoom/2)':"
                 f"d={frames}:s=1280x720:fps={fps},"
