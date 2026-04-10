@@ -16,22 +16,20 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 AUDIO_SEGMENTS_FOLDER = '/tmp/audio_segments'
 os.makedirs(AUDIO_SEGMENTS_FOLDER, exist_ok=True)
 
+FONT_PATH = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+
 
 def download_file(url, dest_path):
-    """Always download fresh - never use cache."""
     cache_bust = f"?nocache={int(time.time())}"
     full_url = url + cache_bust
-    
     headers = {
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
         'Expires': '0'
     }
-    
     r = requests.get(full_url, timeout=120, stream=True, headers=headers)
     if r.status_code != 200:
         r = requests.get(url, timeout=120, stream=True, headers=headers)
-    
     r.raise_for_status()
     with open(dest_path, 'wb') as f:
         for chunk in r.iter_content(chunk_size=8192):
@@ -58,19 +56,18 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
         frames = int(duration * fps)
         fade_out_start = max(duration - 3, duration * 0.95)
 
-        # FULL CINEMATIC EFFECT CHAIN:
-        # 1. Scale to working resolution
-        # 2. Ken Burns breathing zoom (in/out pulse)
-        # 3. Gentle sway (left/right + up/down)
-        # 4. Warm cinematic color grade (golden tones)
-        # 5. Vignette (dark edges, bright center)
-        # 6. Subtle film grain noise
-        # 7. Fade in + fade out
+        # Check available fonts
+        font_check = subprocess.run(['fc-list'], capture_output=True, text=True)
+        if 'DejaVu' in font_check.stdout:
+            font = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+        else:
+            font = '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf'
+
+        # STEP 1: Generate base video with zoom + effects
+        temp_output = output_path + '_temp.mp4'
 
         video_filter = (
-            # Step 1: Scale large enough for zoom without black borders
             f"scale=1920:1080,"
-            # Step 2+3: Ken Burns zoom pulse + gentle sway
             f"zoompan="
             f"z='1.04+0.03*sin(on/200)':"
             f"x='iw/2-(iw/zoom/2)+10*sin(on/150)':"
@@ -78,22 +75,18 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
             f"d={frames}:"
             f"s=1280x720:"
             f"fps={fps},"
-            # Step 4: Warm cinematic color grade
             f"curves="
             f"r='0/0 0.3/0.35 0.7/0.75 1/1':"
             f"g='0/0 0.3/0.28 0.7/0.68 1/0.95':"
             f"b='0/0 0.3/0.22 0.7/0.58 1/0.85',"
-            # Step 5: Vignette effect
             f"vignette=PI/4,"
-            # Step 6: Subtle film grain
-            f"noise=alls=4:allf=t,"
-            # Step 7: Fade in/out
+            f"noise=alls=3:allf=t,"
             f"fade=t=in:st=0:d=2,"
             f"fade=t=out:st={fade_out_start:.2f}:d=3,"
             f"format=yuv420p"
         )
 
-        ffmpeg_cmd = [
+        ffmpeg_step1 = [
             'ffmpeg', '-y',
             '-loop', '1',
             '-i', image_path,
@@ -107,17 +100,58 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
             '-pix_fmt', 'yuv420p',
             '-t', str(duration),
             '-shortest',
-            output_path
+            temp_output
         ]
 
-        proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=3600)
+        proc1 = subprocess.run(ffmpeg_step1, capture_output=True, text=True, timeout=3600)
 
-        if proc.returncode == 0 and os.path.exists(output_path):
-            jobs[job_id]['status'] = 'completed'
-            jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
+        if proc1.returncode == 0 and os.path.exists(temp_output):
+            # STEP 2: Add Sorlune watermark text on top right
+            watermark_filter = (
+                f"drawtext="
+                f"text='🌙 Sorlune':"
+                f"fontfile={font}:"
+                f"fontsize=28:"
+                f"fontcolor=white@0.85:"
+                f"x=w-tw-20:"
+                f"y=20:"
+                f"shadowcolor=black@0.7:"
+                f"shadowx=2:"
+                f"shadowy=2:"
+                f"box=1:"
+                f"boxcolor=black@0.3:"
+                f"boxborderw=8"
+            )
+
+            ffmpeg_step2 = [
+                'ffmpeg', '-y',
+                '-i', temp_output,
+                '-vf', watermark_filter,
+                '-c:v', 'libx264',
+                '-preset', 'ultrafast',
+                '-crf', '20',
+                '-c:a', 'copy',
+                output_path
+            ]
+
+            proc2 = subprocess.run(ffmpeg_step2, capture_output=True, text=True, timeout=600)
+
+            # Cleanup temp
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+
+            if proc2.returncode == 0 and os.path.exists(output_path):
+                jobs[job_id]['status'] = 'completed'
+                jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
+            else:
+                # Use temp without watermark if watermark fails
+                import shutil
+                shutil.copy(temp_output if os.path.exists(temp_output) else output_path, output_path)
+                jobs[job_id]['status'] = 'completed'
+                jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
         else:
-            # Fallback: simple zoom + fade only
-            jobs[job_id]['error'] = proc.stderr[-300:]
+            # Fallback: simple zoom + fade + watermark
+            jobs[job_id]['error'] = proc1.stderr[-300:]
             simple_filter = (
                 f"scale=1920:1080,"
                 f"zoompan="
@@ -127,9 +161,17 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
                 f"d={frames}:s=1280x720:fps={fps},"
                 f"fade=t=in:st=0:d=2,"
                 f"fade=t=out:st={fade_out_start:.2f}:d=3,"
+                f"drawtext="
+                f"text='Sorlune':"
+                f"fontsize=28:"
+                f"fontcolor=white@0.85:"
+                f"x=w-tw-20:"
+                f"y=20:"
+                f"shadowcolor=black@0.7:"
+                f"shadowx=2:shadowy=2,"
                 f"format=yuv420p"
             )
-            ffmpeg_simple = [
+            ffmpeg_fallback = [
                 'ffmpeg', '-y',
                 '-loop', '1',
                 '-i', image_path,
@@ -145,13 +187,13 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
                 '-shortest',
                 output_path
             ]
-            proc2 = subprocess.run(ffmpeg_simple, capture_output=True, text=True, timeout=3600)
-            if proc2.returncode == 0 and os.path.exists(output_path):
+            proc_fb = subprocess.run(ffmpeg_fallback, capture_output=True, text=True, timeout=3600)
+            if proc_fb.returncode == 0 and os.path.exists(output_path):
                 jobs[job_id]['status'] = 'completed'
                 jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
             else:
                 jobs[job_id]['status'] = 'error'
-                jobs[job_id]['error'] = proc2.stderr[-500:]
+                jobs[job_id]['error'] = proc_fb.stderr[-500:]
 
     except Exception as e:
         jobs[job_id]['status'] = 'error'
@@ -183,7 +225,6 @@ def generate_video():
 
     def run():
         try:
-            # Always delete old files first
             for f in [image_path, audio_path, output_path]:
                 if os.path.exists(f):
                     os.remove(f)
@@ -228,16 +269,13 @@ def serve_video(job_id, filename):
 def clear_cache():
     data = request.get_json()
     api_key = data.get('api_key') if data else None
-
     if api_key and api_key in jobs:
         del jobs[api_key]
-
     if api_key:
         import shutil
         job_folder = os.path.join(UPLOAD_FOLDER, api_key)
         if os.path.exists(job_folder):
             shutil.rmtree(job_folder, ignore_errors=True)
-
     return jsonify({'status': 'cleared'}), 200
 
 
