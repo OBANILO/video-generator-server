@@ -8,6 +8,7 @@ import time
 import json
 import math
 import re
+import tempfile
 
 app = Flask(__name__)
 
@@ -79,7 +80,7 @@ def get_best_font():
 #  AI LYRICS TIMING — GPT splits raw lyrics into timed segments
 # ══════════════════════════════════════════════════════════════════════════════
 
-def ai_time_lyrics(lyrics_text, audio_duration, openai_api_key):
+
     """
     Send lyrics + audio duration to GPT-4o-mini.
     Returns list of: [{"start": 0.0, "end": 4.5, "text": "Line 1"}, ...]
@@ -170,6 +171,58 @@ Generate the timed JSON array now."""
 # ══════════════════════════════════════════════════════════════════════════════
 #  ESCAPE TEXT FOR FFMPEG drawtext
 # ══════════════════════════════════════════════════════════════════════════════
+def transcribe_lyrics_with_whisper(audio_path, openai_api_key):
+    """
+    Transcribe the real sung audio with timestamps.
+    Returns:
+    [
+      {"start": 0.0, "end": 3.2, "text": "line text"},
+      ...
+    ]
+    """
+    if not openai_api_key or not os.path.exists(audio_path):
+        return []
+
+    try:
+        with open(audio_path, "rb") as audio_file:
+            response = requests.post(
+                "https://api.openai.com/v1/audio/transcriptions",
+                headers={
+                    "Authorization": f"Bearer {openai_api_key}"
+                },
+                files={
+                    "file": audio_file
+                },
+                data={
+                    "model": "whisper-1",
+                    "response_format": "verbose_json"
+                },
+                timeout=300
+            )
+
+        if response.status_code != 200:
+            return []
+
+        data = response.json()
+        segments = data.get("segments", [])
+        clean = []
+
+        for seg in segments:
+            start = float(seg.get("start", 0))
+            end = float(seg.get("end", start + 2))
+            text = str(seg.get("text", "")).strip()
+
+            if text and end > start:
+                clean.append({
+                    "start": start,
+                    "end": end,
+                    "text": text
+                })
+
+        return clean
+
+    except Exception:
+        return []
 
 def ffmpeg_escape(text):
     """Escape special chars for FFmpeg drawtext filter."""
@@ -185,27 +238,18 @@ def ffmpeg_escape(text):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_karaoke_filter(segments, font):
-    """
-    Build FFmpeg drawtext filters for karaoke-style lyrics.
-    Each segment shows as a large centered gold line for its duration.
-    Features: fade-in/out per line, gold glow shadow, semi-transparent background pill.
-    """
     if not segments:
         return ""
 
     parts = []
 
     for seg in segments:
-        start = seg['start']
-        end   = seg['end']
-        text  = ffmpeg_escape(seg['text'])
-        dur   = max(end - start, 0.5)
+        start = seg["start"]
+        end = seg["end"]
+        text = ffmpeg_escape(seg["text"])
+        dur = max(end - start, 0.5)
+        fade_dur = min(0.25, dur / 4)
 
-        # Fade each line: 0.3s in, 0.3s out (clipped to segment duration)
-        fade_dur = min(0.3, dur / 4)
-
-        # Alpha expression: fade in, hold, fade out
-        # Using between() for visibility window
         alpha_expr = (
             f"if(between(t,{start},{start+fade_dur}),"
             f"(t-{start})/{fade_dur},"
@@ -216,33 +260,19 @@ def build_karaoke_filter(segments, font):
             f"0)))"
         )
 
-        # ── Shadow / glow layer (gold blur effect) ─────────────────────────
-        glow = (
-            f"drawtext="
-            f"fontfile={font}:"
-            f"text='{text}':"
-            f"fontsize=52:"
-            f"fontcolor=0xFFD700@0.25:"
-            f"x=(w-text_w)/2:"
-            f"y=h*0.72:"
-            f"shadowcolor=0xD4AF37@0.5:shadowx=0:shadowy=0:"
-            f"alpha='{alpha_expr}'"
-        )
-
-        # ── Main text (crisp gold) ──────────────────────────────────────────
         main = (
             f"drawtext="
-            f"fontfile={font}:"
+            f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
             f"text='{text}':"
-            f"fontsize=48:"
-            f"fontcolor=0xFFD700@0.97:"
+            f"fontsize=36:"
+            f"fontcolor=white:"
+            f"borderw=3:"
+            f"bordercolor=black@0.95:"
             f"x=(w-text_w)/2:"
-            f"y=h*0.72:"
-            f"shadowcolor=0x000000@0.85:shadowx=2:shadowy=2:"
+            f"y=h*0.82:"
             f"alpha='{alpha_expr}'"
         )
 
-        parts.append(glow)
         parts.append(main)
 
     return ",".join(parts)
@@ -552,15 +582,14 @@ def generate_video():
             download_file(image_url, image_path)
             download_file(audio_url, audio_path)
 
-            # ── AI LYRICS TIMING ───────────────────────────────────────────
-            lyrics_segments = []
-            if lyrics_text and openai_key:
-                try:
-                    duration = get_audio_duration(audio_path)
-                    jobs[job_id]['status'] = 'timing_lyrics'
-                    lyrics_segments = ai_time_lyrics(lyrics_text, duration, openai_key)
-                except Exception:
-                    lyrics_segments = []  # gracefully continue without lyrics
+            # ── REAL AUDIO TRANSCRIPTION ──────────────────────────────────
+lyrics_segments = []
+if openai_key:
+    try:
+        jobs[job_id]['status'] = 'transcribing_lyrics'
+        lyrics_segments = transcribe_lyrics_with_whisper(audio_path, openai_key)
+    except Exception:
+        lyrics_segments = []
 
             generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segments)
 
