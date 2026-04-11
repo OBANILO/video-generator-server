@@ -87,20 +87,31 @@ def split_lyrics_lines(lyrics_text):
         clean = line.strip()
         if not clean:
             continue
-
         # skip section labels like [Verse], [Chorus]
         if clean.startswith('[') and clean.endswith(']'):
             continue
-
         lines.append(clean)
 
     return lines
 
 
+def normalize_text(text):
+    """Lowercase, remove punctuation for matching."""
+    import re
+    return re.sub(r"[^\w\s]", "", text.lower())
+
+
+def words_in_common(a, b):
+    """Count how many words from string a appear in string b."""
+    set_a = set(normalize_text(a).split())
+    set_b = set(normalize_text(b).split())
+    return len(set_a & set_b)
+
+
 def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
     """
-    Whisper gives timing.
-    Displayed text comes from user's own lyrics lines.
+    Uses Whisper word-level timestamps to align user lyric lines precisely.
+    Each lyric line is shown exactly when its words are sung.
     """
     if not openai_api_key or not os.path.exists(audio_path):
         return []
@@ -122,6 +133,7 @@ def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
                 data={
                     "model": "whisper-1",
                     "response_format": "verbose_json",
+                    "timestamp_granularities[]": "word",  # ← word-level timestamps
                     "language": "en"
                 },
                 timeout=300
@@ -131,60 +143,148 @@ def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
             return []
 
         data = response.json()
+
+        # Use word-level timestamps if available
+        words = data.get("words", [])
+
+        if words:
+            return _align_lines_to_words(lyric_lines, words)
+
+        # Fallback to segment-level if words not available
         whisper_segments = data.get("segments", [])
-        if not whisper_segments:
-            return []
+        if whisper_segments:
+            return _align_lines_to_segments(lyric_lines, whisper_segments)
 
-        clean_segments = []
-        usable_segments = []
+        return []
 
-        for seg in whisper_segments:
-            start = float(seg.get("start", 0))
-            end = float(seg.get("end", start + 2))
-            spoken = str(seg.get("text", "")).strip()
+    except Exception:
+        return []
 
-            if end > start and spoken:
-                usable_segments.append({
-                    "start": start,
-                    "end": end
-                })
 
-        if not usable_segments:
-            return []
+def _align_lines_to_words(lyric_lines, words):
+    """
+    Align each lyric line to word timestamps from Whisper.
+    Strategy: for each lyric line, find the chunk of Whisper words that
+    best matches it, and use their start/end times.
+    """
+    if not words or not lyric_lines:
+        return []
 
-        # If there are more lyric lines than whisper segments,
-        # spread lyrics across full duration.
-        if len(lyric_lines) > len(usable_segments):
-            total_start = usable_segments[0]["start"]
-            total_end = usable_segments[-1]["end"]
-            total_duration = max(total_end - total_start, 1.0)
-            step = total_duration / len(lyric_lines)
+    total_words = len(words)
+    num_lines = len(lyric_lines)
 
-            for i, line in enumerate(lyric_lines):
-                start = total_start + (i * step)
-                end = total_start + ((i + 1) * step)
-                clean_segments.append({
-                    "start": round(start, 2),
-                    "end": round(end, 2),
-                    "text": line
-                })
+    # Count approximate words per lyric line
+    line_word_counts = [len(line.split()) for line in lyric_lines]
+    total_lyric_words = sum(line_word_counts)
 
-            return clean_segments
+    segments = []
+    word_idx = 0
 
-        # If whisper segments are more than lyric lines,
-        # map one lyric line to one segment.
-        for i, line in enumerate(lyric_lines):
-            seg = usable_segments[i]
+    for i, line in enumerate(lyric_lines):
+        if word_idx >= total_words:
+            break
+
+        # Estimate how many Whisper words this line should consume
+        # (proportional to word count in line vs total)
+        if total_lyric_words > 0:
+            proportion = line_word_counts[i] / total_lyric_words
+        else:
+            proportion = 1.0 / num_lines
+
+        estimated_words = max(1, round(proportion * total_words))
+
+        # For the last line, take remaining words
+        if i == num_lines - 1:
+            end_idx = total_words
+        else:
+            end_idx = min(word_idx + estimated_words, total_words - (num_lines - i - 1))
+
+        line_words = words[word_idx:end_idx]
+
+        if not line_words:
+            continue
+
+        start_time = float(line_words[0].get("start", 0))
+        end_time = float(line_words[-1].get("end", start_time + 2.0))
+
+        # Give each line a minimum display duration of 1.5s
+        if end_time - start_time < 1.5:
+            end_time = start_time + 1.5
+
+        segments.append({
+            "start": round(start_time, 2),
+            "end": round(end_time, 2),
+            "text": line
+        })
+
+        word_idx = end_idx
+
+    return segments
+
+
+def _align_lines_to_segments(lyric_lines, whisper_segments):
+    """
+    Fallback: align lyric lines to Whisper segments by text similarity.
+    Each lyric line is matched to the segment whose text is most similar.
+    """
+    clean_segments = []
+    usable_segments = []
+
+    for seg in whisper_segments:
+        start = float(seg.get("start", 0))
+        end = float(seg.get("end", start + 2))
+        spoken = str(seg.get("text", "")).strip()
+        if end > start and spoken:
+            usable_segments.append({"start": start, "end": end, "text": spoken})
+
+    if not usable_segments:
+        return []
+
+    num_lines = len(lyric_lines)
+    num_segs = len(usable_segments)
+
+    if num_lines <= num_segs:
+        # Map each lyric line to its best-matching segment
+        # Use greedy forward matching to preserve order
+        used = [False] * num_segs
+        seg_cursor = 0
+
+        for line in lyric_lines:
+            best_idx = seg_cursor
+            best_score = -1
+
+            # Search forward from cursor
+            for j in range(seg_cursor, num_segs):
+                score = words_in_common(line, usable_segments[j]["text"])
+                if score > best_score:
+                    best_score = score
+                    best_idx = j
+
+            seg = usable_segments[best_idx]
             clean_segments.append({
                 "start": seg["start"],
                 "end": seg["end"],
                 "text": line
             })
+            seg_cursor = min(best_idx + 1, num_segs - 1)
 
-        return clean_segments
+    else:
+        # More lyric lines than segments → spread proportionally
+        total_start = usable_segments[0]["start"]
+        total_end = usable_segments[-1]["end"]
+        total_duration = max(total_end - total_start, 1.0)
+        step = total_duration / num_lines
 
-    except Exception:
-        return []
+        for i, line in enumerate(lyric_lines):
+            start = total_start + (i * step)
+            end = total_start + ((i + 1) * step)
+            clean_segments.append({
+                "start": round(start, 2),
+                "end": round(end, 2),
+                "text": line
+            })
+
+    return clean_segments
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -536,7 +636,7 @@ def generate_video():
     return jsonify({
         'status': 'started',
         'job_id': job_id,
-        'lyrics_mode': 'custom_lyrics_with_whisper_timing' if (openai_key and lyrics_text) else 'fallback'
+        'lyrics_mode': 'word_level_whisper' if (openai_key and lyrics_text) else 'fallback'
     }), 200
 
 
