@@ -46,7 +46,6 @@ def get_audio_duration(audio_path):
 
 
 def get_best_font():
-    """Find best available font — prefer serif for VIP luxury look."""
     candidates = [
         '/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf',
         '/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf',
@@ -73,11 +72,8 @@ def build_video_filter(duration, fps, font):
     frames      = int(duration * fps)
     fade_out_st = max(duration - 3, duration * 0.85)
 
-    # ── SLOW LINEAR ZOOM (keyframe style) ──────────────────────────────────────
-    # Zoom from 1.00 → 1.08 across entire clip duration. Per-frame increment is
-    # tiny so motion is imperceptible second-to-second — cinematic slow zoom.
+    # ── 1. SLOW CINEMATIC ZOOM (linear keyframe, 1.00 → 1.08) ─────────────────
     z_inc = 0.08 / max(frames, 1)
-
     zoom_filter = (
         f"scale=3840:2160:flags=lanczos,"
         f"zoompan="
@@ -89,128 +85,190 @@ def build_video_filter(duration, fps, font):
         f"fps={fps}"
     )
 
-    # ── WARM GRADE + VIGNETTE + GRAIN ──────────────────────────────────────────
-    grade_filter = (
-        f"curves="
-        f"r='0/0 0.5/0.52 1/1':"
-        f"g='0/0 0.5/0.49 1/0.96':"
-        f"b='0/0 0.5/0.44 1/0.88',"
-        f"vignette=PI/5,"
-        f"noise=alls=2:allf=t"
+    # ── 2. LIGHT PULSE ANIMATION ───────────────────────────────────────────────
+    # Achieved via curves filter with time-varying brightness oscillation.
+    # We layer two effects:
+    #   a) Overall brightness pulse: gentle sine wave on all channels
+    #   b) Warm highlight boost: pushes highlights up/down to simulate lights
+    # FFmpeg 'curves' doesn't support time expressions, so we use 'colorbalance'
+    # and 'curves' chained with 'lutrgb' using 't' variable for time animation.
+    #
+    # BEST approach for light flicker: use 'eq' filter with time-based brightness
+    # eq=brightness expression + 'hue' saturation pulse = realistic light movement
+    #
+    # brightness oscillates: 0.0 ± 0.06 at ~0.7Hz (slow atmospheric pulse)
+    # contrast stays ~1.05 to pop the lights
+    # saturation pulses slightly: 1.0 ± 0.08 (makes warm lights glow warmer)
+
+    light_filter = (
+        f"eq="
+        f"brightness='0.04*sin(t*2.2+0.3)':"       # slow brightness pulse
+        f"contrast='1.05+0.04*sin(t*1.8+1.0)':"    # contrast breathes
+        f"saturation='1.08+0.10*sin(t*2.5+0.8)'"   # saturation warms/cools
     )
 
-    # ── FADE IN / OUT ──────────────────────────────────────────────────────────
+    # ── 3. WARM GRADE + VIGNETTE + GRAIN ──────────────────────────────────────
+    grade_filter = (
+        f"curves="
+        f"r='0/0 0.5/0.53 1/1':"
+        f"g='0/0 0.5/0.48 1/0.95':"
+        f"b='0/0 0.5/0.43 1/0.86',"
+        f"vignette=PI/4.5,"
+        f"noise=alls=3:allf=t"
+    )
+
+    # ── 4. FADE IN / OUT ───────────────────────────────────────────────────────
     fade_filter = (
         f"fade=t=in:st=0:d=2,"
         f"fade=t=out:st={fade_out_st:.2f}:d=3"
     )
 
-    # ── VIP WATERMARK — top right ──────────────────────────────────────────────
-    # Layout:
-    #   ─────────── (thin gold line, y=16)
-    #    SORLUNE    (serif gold glowing text, y=26)
-    #   ─────────── (thin gold line, y=52)
-    #
-    # Lines: rendered as drawtext with space chars + gold box background
-    # This is more reliable than drawbox across FFmpeg versions.
-    m = 20   # right margin
-    # Top gold line
+    # ── 5. VIP WATERMARK — top right ──────────────────────────────────────────
+    # thin gold line / SORLUNE (serif glowing gold) / thin gold line
+    m = 20
     top_line = (
         f"drawtext="
         f"fontfile={font}:"
         f"text='                        ':"
-        f"fontsize=7:"
-        f"fontcolor=0xD4AF37@0:"
+        f"fontsize=7:fontcolor=0xD4AF37@0:"
         f"box=1:boxcolor=0xD4AF37@0.85:boxborderw=0:"
         f"x=w-tw-{m}:y=16"
     )
-    # Bottom gold line
     bot_line = (
         f"drawtext="
         f"fontfile={font}:"
         f"text='                        ':"
-        f"fontsize=7:"
-        f"fontcolor=0xD4AF37@0:"
+        f"fontsize=7:fontcolor=0xD4AF37@0:"
         f"box=1:boxcolor=0xD4AF37@0.85:boxborderw=0:"
         f"x=w-tw-{m}:y=52"
     )
-    # Glow layer (slightly brighter, low alpha, same position)
     glow_text = (
         f"drawtext="
         f"fontfile={font}:"
         f"text='SORLUNE':"
-        f"fontsize=25:"
-        f"fontcolor=0xF5E080@0.22:"
+        f"fontsize=25:fontcolor=0xF5E080@0.22:"
         f"x=w-tw-{m}:y=27:"
         f"shadowcolor=0xD4AF37@0.35:shadowx=0:shadowy=0"
     )
-    # Main crisp gold text
     main_text = (
         f"drawtext="
         f"fontfile={font}:"
         f"text='SORLUNE':"
-        f"fontsize=22:"
-        f"fontcolor=0xD4AF37@0.97:"
+        f"fontsize=22:fontcolor=0xD4AF37@0.97:"
         f"x=w-tw-{m}:y=28:"
         f"shadowcolor=0x000000@0.95:shadowx=1:shadowy=1"
     )
-
     watermark_filter = f"{top_line},{bot_line},{glow_text},{main_text}"
 
-    # ── CENTERED EQUALIZER BARS — bottom center ────────────────────────────────
-    # 11 thin vertical bars, gold, animated via sin() at different speeds/phases
-    # Each bar: drawtext with '|' char, fontsize expression = base + amp*|sin(t*f+p)|
-    # Bars are symmetric (mirror left/right of center) for VIP look
-    # fontsize drives height; y adjusts so bars are bottom-anchored
+    # ── 6. GLOWING EQUALIZER — center bottom, style like reference image ───────
+    #
+    # Reference image style:
+    #   - Many thin tall bars growing from a CENTER horizontal line (up AND down)
+    #   - Bright glowing core, fading toward edges
+    #   - Hot pink/magenta glow — we use GOLD to match Sorlune brand
+    #   - Bars are taller in center, shorter on edges (mountain shape envelope)
+    #
+    # Implementation:
+    #   - 21 bars (odd number = clean center bar)
+    #   - Each bar = TWO drawtext '|' chars: one going UP, one going DOWN
+    #   - Center horizontal line = drawtext box (thin gold line)
+    #   - Outer bars have lower amplitude (envelope shape)
+    #   - Each bar has unique frequency + phase for organic movement
+    #   - Center bars brighter (higher alpha), edge bars more transparent
+    #
+    # Bar center Y = h - 80 (80px from bottom = center line position)
+    # Bars grow symmetrically up and down from this center line.
 
-    bar_count  = 11
-    bar_gap    = 14      # px between bar centers
-    bar_base   = 6       # min fontsize (min bar height)
-    bar_amp    = 26      # max extra height
-    bottom_y   = 30      # px from bottom of frame
+    bar_count   = 21          # total bars (must be odd for clean center)
+    bar_gap     = 18          # px between bar centers  (21 bars * 18 = 378px total)
+    center_y    = "h-80"      # center line Y position
+    max_amp     = 55          # max half-height of tallest bar (center)
+    min_amp     = 12          # min half-height of edge bars
 
-    # Symmetric frequencies + phases (mirror around center bar)
-    bars_params = [
-        (1.7, 0.0),
-        (2.3, 0.6),
-        (2.9, 1.1),
-        (2.1, 1.6),
-        (3.3, 0.4),
-        (2.6, 0.9),   # center
-        (3.3, 0.4),
-        (2.1, 1.6),
-        (2.9, 1.1),
-        (2.3, 0.6),
-        (1.7, 0.0),
-    ]
+    # Envelope: bars near center are tallest
+    # amplitude[i] = min_amp + (max_amp - min_amp) * gaussian(i, center)
+    half  = bar_count // 2    # = 10
+    eq_parts = []
 
-    half_w    = (bar_count - 1) * bar_gap // 2
-    eq_parts  = []
+    # Center horizontal glow line
+    line_total_w = (bar_count - 1) * bar_gap + 4
+    line_x       = f"(w/2-{line_total_w//2})"
+    center_line  = (
+        f"drawtext="
+        f"fontfile={font}:"
+        f"text='{'─' * 42}':"
+        f"fontsize=9:fontcolor=0xD4AF37@0:"
+        f"box=1:boxcolor=0xD4AF37@0.55:boxborderw=0:"
+        f"x={line_x}:y={center_y}"
+    )
+    eq_parts.append(center_line)
 
-    for i, (freq, phase) in enumerate(bars_params):
-        offset = -half_w + i * bar_gap
-        # x: center of video + offset - half char width (~4px for '|')
+    # Frequencies and phases — varied for organic look
+    import math
+    freqs  = [1.5, 2.1, 2.7, 1.9, 3.1, 2.4, 1.7, 2.9, 2.2, 3.5, 2.0,
+              3.5, 2.2, 2.9, 1.7, 2.4, 3.1, 1.9, 2.7, 2.1, 1.5]
+    phases = [0.0, 0.5, 1.1, 1.7, 0.3, 0.9, 1.5, 0.2, 0.8, 1.4, 0.6,
+              1.4, 0.8, 0.2, 1.5, 0.9, 0.3, 1.7, 1.1, 0.5, 0.0]
+
+    for i in range(bar_count):
+        # Gaussian envelope: center bars tallest
+        dist      = abs(i - half) / half          # 0.0 at center, 1.0 at edge
+        amplitude = min_amp + (max_amp - min_amp) * math.exp(-3.5 * dist * dist)
+        amplitude = int(amplitude)
+
+        # Alpha: center bars brighter
+        alpha_up   = 0.75 - 0.35 * dist           # 0.75 center → 0.40 edge
+        alpha_down = 0.45 - 0.20 * dist           # dimmer going down
+
+        freq  = freqs[i]
+        phase = phases[i]
+
+        # X position (centered on screen)
+        offset = (i - half) * bar_gap
         bar_x  = f"(w/2+({offset})-tw/2)"
-        fs_expr = f"{bar_base}+{bar_amp}*abs(sin(t*{freq}+{phase}))"
-        # y: bottom-anchor — bar bottom stays fixed at (h - bottom_y)
-        bar_y  = f"(h-{bottom_y}-({bar_base}+{bar_amp}*abs(sin(t*{freq}+{phase}))))"
 
-        eq_part = (
+        fs_expr = f"{4}+{amplitude}*abs(sin(t*{freq}+{phase}))"
+
+        # UP bar: grows upward from center line
+        y_up = f"({center_y}-({4}+{amplitude}*abs(sin(t*{freq}+{phase}))))"
+
+        # DOWN bar: grows downward from center line
+        y_down = f"({center_y})"
+
+        fs_down = f"{3}+{max(4, amplitude//2)}*abs(sin(t*{freq}+{phase}+0.2))"
+        y_down_pos = f"({center_y})"
+
+        # UP bar
+        bar_up = (
             f"drawtext="
             f"fontfile={font}:"
             f"text='|':"
             f"fontsize='{fs_expr}':"
-            f"fontcolor=0xC9A840@0.40:"
+            f"fontcolor=0xD4AF37@{alpha_up:.2f}:"
             f"x={bar_x}:"
-            f"y={bar_y}"
+            f"y={y_up}"
         )
-        eq_parts.append(eq_part)
+
+        # DOWN bar (shorter, dimmer — like the reference image lower half)
+        bar_down = (
+            f"drawtext="
+            f"fontfile={font}:"
+            f"text='|':"
+            f"fontsize='{fs_down}':"
+            f"fontcolor=0xC49A20@{alpha_down:.2f}:"
+            f"x={bar_x}:"
+            f"y={y_down_pos}"
+        )
+
+        eq_parts.append(bar_up)
+        eq_parts.append(bar_down)
 
     eq_filter = ",".join(eq_parts)
 
     # ── COMBINE ALL ────────────────────────────────────────────────────────────
     full_filter = (
         f"{zoom_filter},"
+        f"{light_filter},"
         f"{grade_filter},"
         f"{fade_filter},"
         f"format=yuv420p,"
@@ -254,7 +312,7 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
             jobs[job_id]['status'] = 'completed'
             jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
         else:
-            # ── FALLBACK: bare-minimum filter ──────────────────────────────────
+            # ── FALLBACK ───────────────────────────────────────────────────────
             jobs[job_id]['error'] = proc.stderr[-500:]
             frames  = int(duration * fps)
             z_inc   = 0.08 / max(frames, 1)
@@ -267,13 +325,13 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
                 f"x='iw/2-(iw/zoom/2)':"
                 f"y='ih/2-(ih/zoom/2)':"
                 f"d={frames}:s=1280x720:fps={fps},"
+                f"eq=brightness='0.04*sin(t*2.2)':saturation='1.08+0.10*sin(t*2.5)',"
                 f"fade=t=in:st=0:d=2,"
                 f"fade=t=out:st={fade_st:.2f}:d=3,"
                 f"drawtext="
                 f"fontfile={font}:"
                 f"text='SORLUNE':"
-                f"fontsize=22:"
-                f"fontcolor=0xD4AF37@0.97:"
+                f"fontsize=22:fontcolor=0xD4AF37@0.97:"
                 f"x=w-tw-20:y=28:"
                 f"shadowcolor=0x000000@0.95:shadowx=1:shadowy=1,"
                 f"format=yuv420p"
