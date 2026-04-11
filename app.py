@@ -75,20 +75,18 @@ def get_best_font():
 # LYRICS CLEANING — strips ALL section labels, headers, guides
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Patterns that indicate a section label / guide line (NOT actual sung lyrics)
 SECTION_LABEL_PATTERNS = [
-    r'^\[.*\]$',                          # [Verse 1], [Chorus], [Bridge]
-    r'^\(.*\)$',                          # (Verse), (Chorus)
+    r'^\[.*\]$',
+    r'^\(.*\)$',
     r'^(verse|chorus|bridge|hook|outro|intro|pre-chorus|post-chorus|refrain|interlude|instrumental|spoken|rap|breakdown)\s*[\d:]*\s*$',
     r'^(verse|chorus|bridge|hook|outro|intro|pre-chorus|post-chorus|refrain|interlude|instrumental|spoken|rap|breakdown)\s*[\d:]+',
-    r'^\d+[\.\)]\s*$',                   # "1." or "1)" alone
+    r'^\d+[\.\)]\s*$',
 ]
 
 SECTION_REGEX = [re.compile(p, re.IGNORECASE) for p in SECTION_LABEL_PATTERNS]
 
 
 def is_section_label(line):
-    """Return True if this line is a section header, not actual lyrics."""
     stripped = line.strip()
     for pattern in SECTION_REGEX:
         if pattern.match(stripped):
@@ -97,7 +95,6 @@ def is_section_label(line):
 
 
 def split_lyrics_lines(lyrics_text):
-    """Extract only the actual sung lyric lines, stripping all section labels."""
     if not lyrics_text:
         return []
 
@@ -109,68 +106,24 @@ def split_lyrics_lines(lyrics_text):
         if not clean:
             continue
         if is_section_label(clean):
-            continue   # ← skip Verse 1:, [Chorus], (Bridge), etc.
+            continue
         lines.append(clean)
 
     return lines
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WHISPER + LYRICS ALIGNMENT
+# WHISPER + LYRICS ALIGNMENT (FIXED)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def normalize_word(w):
-    """Lowercase and strip punctuation for matching."""
     return re.sub(r"[^\w]", "", w.lower())
-
-
-def line_match_score(lyric_line, whisper_words, start_idx, count):
-    """
-    Score how well a lyric line matches a slice of Whisper words.
-    Returns a score between 0 and 1.
-    """
-    lyric_words = [normalize_word(w) for w in lyric_line.split() if normalize_word(w)]
-    whisper_slice = [normalize_word(w["word"]) for w in whisper_words[start_idx:start_idx + count] if normalize_word(w.get("word", ""))]
-
-    if not lyric_words or not whisper_slice:
-        return 0.0
-
-    matches = sum(1 for w in lyric_words if w in whisper_slice)
-    return matches / max(len(lyric_words), len(whisper_slice))
-
-
-def find_best_word_window(lyric_line, whisper_words, search_from, max_search=80):
-    """
-    Find the best matching window of Whisper words for a lyric line.
-    Searches forward from search_from index.
-    Returns (best_start_idx, best_end_idx, best_score).
-    """
-    lyric_word_count = len(lyric_line.split())
-    # Allow window to be 50% smaller or 100% larger than lyric line
-    min_w = max(1, lyric_word_count - lyric_word_count // 2)
-    max_w = lyric_word_count * 2
-
-    best_score = -1
-    best_start = search_from
-    best_end = min(search_from + lyric_word_count, len(whisper_words))
-
-    search_limit = min(search_from + max_search, len(whisper_words))
-
-    for start in range(search_from, search_limit):
-        for window in range(min_w, min(max_w + 1, len(whisper_words) - start + 1)):
-            score = line_match_score(lyric_line, whisper_words, start, window)
-            if score > best_score:
-                best_score = score
-                best_start = start
-                best_end = start + window
-
-    return best_start, best_end, best_score
 
 
 def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
     """
-    Transcribes audio with Whisper word-level timestamps.
-    Aligns each user lyric line to actual words being sung.
+    Transcribes audio with Whisper segment-level timestamps.
+    Uses segment timestamps as ground truth — no cursor drift.
     """
     if not openai_api_key or not os.path.exists(audio_path):
         return []
@@ -188,114 +141,138 @@ def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
                 data={
                     "model": "whisper-1",
                     "response_format": "verbose_json",
-                    "timestamp_granularities[]": "word",
+                    "timestamp_granularities[]": "segment",
                     "language": "en"
                 },
                 timeout=300
             )
 
         if response.status_code != 200:
+            print(f"Whisper API error: {response.status_code} {response.text}")
             return []
 
         data = response.json()
-        words = data.get("words", [])
-
-        if words:
-            return _align_by_word_matching(lyric_lines, words)
-
-        # Fallback: segment-level proportional spread
         segments = data.get("segments", [])
-        if segments:
-            return _align_by_segments_proportional(lyric_lines, segments)
 
+        if not segments:
+            print("Whisper returned no segments.")
+            return []
+
+        return _align_lyrics_to_segments(lyric_lines, segments)
+
+    except Exception as e:
+        print(f"Whisper transcription error: {e}")
         return []
 
-    except Exception:
+
+def _score_line_vs_segment(lyric_line, seg_text):
+    """
+    Word-overlap Jaccard score between a lyric line and a Whisper segment text.
+    Returns 0.0–1.0.
+    """
+    lyric_words = set(normalize_word(w) for w in lyric_line.split() if normalize_word(w))
+    seg_words   = set(normalize_word(w) for w in seg_text.split()   if normalize_word(w))
+    if not lyric_words or not seg_words:
+        return 0.0
+    return len(lyric_words & seg_words) / max(len(lyric_words), len(seg_words))
+
+
+def _align_lyrics_to_segments(lyric_lines, whisper_segments):
+    """
+    Maps lyric lines to Whisper segments using segment timestamps as ground truth.
+
+    Strategy:
+    - Whisper gives M segments with reliable start/end times.
+    - We have N lyric lines to display.
+    - For each lyric line, find the Whisper segment whose text best matches it.
+    - Assign those lyric lines the segment's exact timestamps (spread evenly
+      if multiple lines map to one segment).
+    - If overall match quality is poor (foreign lyrics, heavy reverb, etc.),
+      fall back to proportional distribution across full audio duration.
+    """
+
+    # Sanitise segments
+    segs = [
+        {
+            "start": float(s.get("start", 0)),
+            "end":   float(s.get("end",   0)),
+            "text":  s.get("text", "").strip().lower()
+        }
+        for s in whisper_segments
+        if float(s.get("end", 0)) > float(s.get("start", 0))
+    ]
+
+    if not segs:
         return []
 
+    # --- Build match: for each lyric line, find best Whisper segment ---
+    matches = []   # list of (best_score, best_seg_index)
+    for line in lyric_lines:
+        best_score = -1.0
+        best_idx   = 0
+        for j, seg in enumerate(segs):
+            s = _score_line_vs_segment(line, seg["text"])
+            if s > best_score:
+                best_score = s
+                best_idx   = j
+        matches.append((best_score, best_idx))
 
-def _align_by_word_matching(lyric_lines, whisper_words):
-    """
-    Best approach: match each lyric line to the Whisper words it corresponds to
-    using text similarity search. This handles intros, pauses, repeated choruses.
-    """
-    result = []
-    word_cursor = 0
-    total_words = len(whisper_words)
+    avg_score = sum(m[0] for m in matches) / len(matches) if matches else 0.0
+    print(f"[Lyrics align] avg match score: {avg_score:.2f} over {len(lyric_lines)} lines / {len(segs)} segments")
 
-    for i, line in enumerate(lyric_lines):
-        if word_cursor >= total_words:
-            # No more whisper words — estimate time based on last segment
-            if result:
-                last_end = result[-1]["end"]
-                result.append({
-                    "start": round(last_end + 0.2, 2),
-                    "end": round(last_end + 2.5, 2),
-                    "text": line
-                })
-            continue
+    if avg_score >= 0.20:
+        # Good enough — group lines by matched segment, spread within that segment's time window
+        seg_to_lines = {}
+        for i, (sc, seg_idx) in enumerate(matches):
+            seg_to_lines.setdefault(seg_idx, []).append(i)
 
-        # How far ahead to search (don't skip too far)
-        max_search = min(60, total_words - word_cursor)
+        line_timings = {}
+        for seg_idx, line_indices in seg_to_lines.items():
+            seg     = segs[seg_idx]
+            seg_dur = max(seg["end"] - seg["start"], 0.1)
+            step    = seg_dur / len(line_indices)
+            for k, line_idx in enumerate(line_indices):
+                start = seg["start"] + k * step
+                end   = seg["start"] + (k + 1) * step
+                line_timings[line_idx] = (round(start, 2), round(end, 2))
 
-        best_start, best_end, score = find_best_word_window(
-            line, whisper_words, word_cursor, max_search
-        )
+        # Safety net: any unmatched lines go after the last segment
+        last_end = segs[-1]["end"]
+        for i in range(len(lyric_lines)):
+            if i not in line_timings:
+                line_timings[i] = (round(last_end + 0.2, 2), round(last_end + 2.0, 2))
+                last_end += 2.2
 
-        # If score is very low, the words might not match well
-        # (e.g. repeated chorus, humming, etc.) — use positional estimate
-        if score < 0.15:
-            # Estimate proportionally based on remaining lines and words
-            remaining_lines = len(lyric_lines) - i
-            remaining_words = total_words - word_cursor
-            words_for_this_line = max(1, remaining_words // remaining_lines)
-            best_start = word_cursor
-            best_end = min(word_cursor + words_for_this_line, total_words)
+        result = []
+        for i, line in enumerate(lyric_lines):
+            start, end = line_timings[i]
+            result.append({"start": start, "end": end, "text": line})
 
-        seg_words = whisper_words[best_start:best_end]
-        if seg_words:
-            seg_start = float(seg_words[0].get("start", 0))
-            seg_end = float(seg_words[-1].get("end", seg_start + 2.0))
-        else:
-            seg_start = float(whisper_words[word_cursor].get("start", 0)) if word_cursor < total_words else 0
-            seg_end = seg_start + 2.0
+    else:
+        # Poor match — proportional fallback across full audio
+        print("[Lyrics align] Low match score, using proportional fallback.")
+        result = _align_proportional(lyric_lines, segs)
 
-        # Minimum display time of 1.5 seconds per line
-        if seg_end - seg_start < 1.5:
-            seg_end = seg_start + 1.5
-
-        result.append({
-            "start": round(seg_start, 2),
-            "end": round(seg_end, 2),
-            "text": line
-        })
-
-        # Move cursor forward — don't go backwards
-        word_cursor = max(word_cursor + 1, best_end)
+    # Enforce minimum display time of 1.5 s per line
+    for seg in result:
+        if seg["end"] - seg["start"] < 1.5:
+            seg["end"] = round(seg["start"] + 1.5, 2)
 
     return result
 
 
-def _align_by_segments_proportional(lyric_lines, whisper_segments):
-    """Fallback when word timestamps not available — proportional spread across segments."""
-    usable = [
-        {"start": float(s.get("start", 0)), "end": float(s.get("end", 2))}
-        for s in whisper_segments
-        if float(s.get("end", 0)) > float(s.get("start", 0))
-    ]
-    if not usable:
-        return []
-
-    total_start = usable[0]["start"]
-    total_end = usable[-1]["end"]
-    total_dur = max(total_end - total_start, 1.0)
-    step = total_dur / len(lyric_lines)
+def _align_proportional(lyric_lines, segs):
+    """Evenly spread lyric lines across the full transcribed time range."""
+    total_start = segs[0]["start"]
+    total_end   = segs[-1]["end"]
+    total_dur   = max(total_end - total_start, 1.0)
+    step        = total_dur / len(lyric_lines)
 
     return [
         {
-            "start": round(total_start + i * step, 2),
-            "end": round(total_start + (i + 1) * step, 2),
-            "text": line
+            "start": round(total_start + i * step,       2),
+            "end":   round(total_start + (i + 1) * step, 2),
+            "text":  line
         }
         for i, line in enumerate(lyric_lines)
     ]
@@ -321,20 +298,19 @@ def ffmpeg_escape(text):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def wrap_lyric_line(text, max_chars=38):
-    """Split long lyric lines into max 2 balanced lines."""
     if len(text) <= max_chars:
         return [text]
 
     words = text.split()
     best_split = len(words) // 2
-    best_diff = float('inf')
+    best_diff  = float('inf')
 
     for i in range(1, len(words)):
         part1 = " ".join(words[:i])
         part2 = " ".join(words[i:])
-        diff = abs(len(part1) - len(part2))
+        diff  = abs(len(part1) - len(part2))
         if diff < best_diff and len(part1) <= max_chars and len(part2) <= max_chars:
-            best_diff = diff
+            best_diff  = diff
             best_split = i
 
     return [" ".join(words[:best_split]), " ".join(words[best_split:])]
@@ -344,16 +320,16 @@ def build_karaoke_filter(segments, font):
     if not segments:
         return ""
 
-    parts = []
-    FONT_SIZE = 34
+    parts       = []
+    FONT_SIZE   = 34
     LINE_HEIGHT = 44
-    MAX_CHARS = 38
+    MAX_CHARS   = 38
 
     for seg in segments:
-        start = seg["start"]
-        end = seg["end"]
+        start    = seg["start"]
+        end      = seg["end"]
         raw_text = seg["text"]
-        dur = max(end - start, 0.5)
+        dur      = max(end - start, 0.5)
         fade_dur = min(0.20, dur / 4)
 
         alpha_expr = (
@@ -378,7 +354,7 @@ def build_karaoke_filter(segments, font):
             )
         else:
             for li, line in enumerate(lines):
-                text = ffmpeg_escape(line)
+                text  = ffmpeg_escape(line)
                 y_pos = f"h*0.76+{li * LINE_HEIGHT}"
                 parts.append(
                     f"drawtext=fontfile={font}:text='{text}':"
@@ -395,7 +371,7 @@ def build_karaoke_filter(segments, font):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_video_filter(duration, fps, font, lyrics_segments=None):
-    frames = int(duration * fps)
+    frames      = int(duration * fps)
     fade_out_st = max(duration - 3, duration * 0.85)
 
     z_inc = 0.08 / max(frames, 1)
@@ -461,16 +437,16 @@ def build_video_filter(duration, fps, font, lyrics_segments=None):
     watermark_filter = f"{top_line},{bot_line},{glow_text},{main_text}"
 
     bar_count = 21
-    bar_gap = 18
-    center_y = "h-80"
-    max_amp = 55
-    min_amp = 12
-    half = bar_count // 2
-    eq_parts = []
+    bar_gap   = 18
+    center_y  = "h-80"
+    max_amp   = 55
+    min_amp   = 12
+    half      = bar_count // 2
+    eq_parts  = []
 
     line_total_w = (bar_count - 1) * bar_gap + 4
-    line_x = f"(w/2-{line_total_w//2})"
-    center_line = (
+    line_x       = f"(w/2-{line_total_w//2})"
+    center_line  = (
         f"drawtext=fontfile={font}:text='{'─' * 42}':"
         f"fontsize=9:fontcolor=0xD4AF37@0:"
         f"box=1:boxcolor=0xD4AF37@0.55:boxborderw=0:"
@@ -484,15 +460,15 @@ def build_video_filter(duration, fps, font, lyrics_segments=None):
               1.4, 0.8, 0.2, 1.5, 0.9, 0.3, 1.7, 1.1, 0.5, 0.0]
 
     for i in range(bar_count):
-        dist = abs(i - half) / half
+        dist      = abs(i - half) / half
         amplitude = int(min_amp + (max_amp - min_amp) * math.exp(-3.5 * dist * dist))
         alpha_up  = 0.75 - 0.35 * dist
         alpha_dwn = 0.45 - 0.20 * dist
-        freq  = freqs[i]
-        phase = phases[i]
-        offset = (i - half) * bar_gap
-        bar_x  = f"(w/2+({offset})-tw/2)"
-        fs_expr = f"{4}+{amplitude}*abs(sin(t*{freq}+{phase}))"
+        freq      = freqs[i]
+        phase     = phases[i]
+        offset    = (i - half) * bar_gap
+        bar_x     = f"(w/2+({offset})-tw/2)"
+        fs_expr   = f"{4}+{amplitude}*abs(sin(t*{freq}+{phase}))"
 
         eq_parts.append(
             f"drawtext=fontfile={font}:text='|':"
@@ -531,8 +507,8 @@ def generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segme
     try:
         jobs[job_id]['status'] = 'processing'
         duration = get_audio_duration(audio_path)
-        fps = 25
-        font = get_best_font()
+        fps      = 25
+        font     = get_best_font()
 
         video_filter = build_video_filter(duration, fps, font, lyrics_segments)
 
@@ -551,15 +527,15 @@ def generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segme
         proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=3600)
 
         if proc.returncode == 0 and os.path.exists(output_path):
-            jobs[job_id]['status'] = 'completed'
+            jobs[job_id]['status']    = 'completed'
             jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
         else:
             jobs[job_id]['status'] = 'error'
-            jobs[job_id]['error'] = proc.stderr[-1200:]
+            jobs[job_id]['error']  = proc.stderr[-1200:]
 
     except Exception as e:
         jobs[job_id]['status'] = 'error'
-        jobs[job_id]['error'] = str(e)
+        jobs[job_id]['error']  = str(e)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -608,15 +584,16 @@ def generate_video():
                     lyrics_segments = transcribe_lyrics_with_whisper(
                         audio_path, openai_key, lyrics_text
                     )
-                except Exception:
+                except Exception as e:
+                    print(f"Lyrics transcription failed: {e}")
                     lyrics_segments = []
 
+            # Fallback: evenly spread across full audio duration
             if not lyrics_segments and lyrics_text:
-                # Fallback: evenly spread across full audio duration
                 duration = get_audio_duration(audio_path)
-                lines = split_lyrics_lines(lyrics_text)
+                lines    = split_lyrics_lines(lyrics_text)
                 if lines:
-                    step = max(duration / len(lines), 1.0)
+                    step    = max(duration / len(lines), 1.5)
                     current = 0.0
                     for line in lines:
                         lyrics_segments.append({
@@ -630,16 +607,16 @@ def generate_video():
 
         except Exception as e:
             jobs[job_id]['status'] = 'error'
-            jobs[job_id]['error'] = str(e)
+            jobs[job_id]['error']  = str(e)
 
-    thread = threading.Thread(target=run)
+    thread        = threading.Thread(target=run)
     thread.daemon = True
     thread.start()
 
     return jsonify({
-        'status': 'started',
-        'job_id': job_id,
-        'lyrics_mode': 'word_match_whisper' if (openai_key and lyrics_text) else 'fallback'
+        'status':      'started',
+        'job_id':      job_id,
+        'lyrics_mode': 'segment_match_whisper' if (openai_key and lyrics_text) else 'fallback'
     }), 200
 
 
@@ -651,8 +628,8 @@ def check_status(api_key):
 
     response = {'status': job['status']}
     if job['status'] == 'completed':
-        base_url = request.host_url.rstrip('/')
-        response['video_url'] = base_url + f'/videos/{api_key}/{api_key}.mp4'
+        base_url               = request.host_url.rstrip('/')
+        response['video_url']  = base_url + f'/videos/{api_key}/{api_key}.mp4'
 
     if job.get('error'):
         response['error'] = job['error']
@@ -668,7 +645,7 @@ def serve_video(job_id, filename):
 
 @app.route('/clear-cache', methods=['POST'])
 def clear_cache():
-    data = request.get_json()
+    data    = request.get_json()
     api_key = data.get('api_key') if data else None
 
     if api_key and api_key in jobs:
