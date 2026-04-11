@@ -5,6 +5,9 @@ import uuid
 import requests
 import threading
 import time
+import json
+import math
+import re
 
 app = Flask(__name__)
 
@@ -16,6 +19,10 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 AUDIO_SEGMENTS_FOLDER = '/tmp/audio_segments'
 os.makedirs(AUDIO_SEGMENTS_FOLDER, exist_ok=True)
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  UTILITIES
+# ══════════════════════════════════════════════════════════════════════════════
 
 def download_file(url, dest_path):
     cache_bust = f"?nocache={int(time.time())}"
@@ -68,11 +75,188 @@ def get_best_font():
     return candidates[-1]
 
 
-def build_video_filter(duration, fps, font):
+# ══════════════════════════════════════════════════════════════════════════════
+#  AI LYRICS TIMING — GPT splits raw lyrics into timed segments
+# ══════════════════════════════════════════════════════════════════════════════
+
+def ai_time_lyrics(lyrics_text, audio_duration, openai_api_key):
+    """
+    Send lyrics + audio duration to GPT-4o-mini.
+    Returns list of: [{"start": 0.0, "end": 4.5, "text": "Line 1"}, ...]
+    """
+    if not openai_api_key or not lyrics_text or not lyrics_text.strip():
+        return []
+
+    system_prompt = """You are a professional lyrics timing expert.
+Given a song's full lyrics and its total duration in seconds, split the lyrics into lines
+and assign realistic start/end timestamps (in seconds) to each line.
+
+Rules:
+- Each lyric segment should be 1-2 short lines max (max ~40 characters per line).
+- Space lines naturally — allow 0.3-0.8s gaps between segments for breathing.
+- Intro/outro: leave first 2s and last 3s without lyrics.
+- Verses flow at a medium pace; choruses can be slightly faster.
+- Return ONLY a valid JSON array. No explanation, no markdown, no code block.
+
+Format:
+[
+  {"start": 2.0, "end": 5.5, "text": "First line of lyrics"},
+  {"start": 6.2, "end": 10.0, "text": "Second line"},
+  ...
+]"""
+
+    user_prompt = f"""Total audio duration: {audio_duration:.1f} seconds
+
+Full lyrics:
+{lyrics_text}
+
+Generate the timed JSON array now."""
+
+    try:
+        response = requests.post(
+            'https://api.openai.com/v1/chat/completions',
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {openai_api_key}'
+            },
+            json={
+                'model': 'gpt-4o-mini',
+                'messages': [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt}
+                ],
+                'temperature': 0.3,
+                'response_format': {'type': 'json_object'}
+            },
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            return []
+
+        body = response.json()
+        raw = body['choices'][0]['message']['content']
+
+        # GPT might wrap in {"segments": [...]} or return array directly
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            segments = parsed
+        elif isinstance(parsed, dict):
+            # find the first list value
+            segments = next(
+                (v for v in parsed.values() if isinstance(v, list)),
+                []
+            )
+        else:
+            return []
+
+        # Validate and clean segments
+        clean = []
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            start = float(seg.get('start', 0))
+            end   = float(seg.get('end', start + 3))
+            text  = str(seg.get('text', '')).strip()
+            if text and end > start and start >= 0 and end <= audio_duration + 1:
+                clean.append({'start': start, 'end': end, 'text': text})
+
+        return clean
+
+    except Exception:
+        return []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ESCAPE TEXT FOR FFMPEG drawtext
+# ══════════════════════════════════════════════════════════════════════════════
+
+def ffmpeg_escape(text):
+    """Escape special chars for FFmpeg drawtext filter."""
+    text = text.replace('\\', '\\\\')
+    text = text.replace("'",  "\u2019")   # replace apostrophe with right single quote (safer)
+    text = text.replace(':',  '\\:')
+    text = text.replace('%',  '\\%')
+    return text
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  KARAOKE LYRICS FILTER — one glowing gold line at a time, centered
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_karaoke_filter(segments, font):
+    """
+    Build FFmpeg drawtext filters for karaoke-style lyrics.
+    Each segment shows as a large centered gold line for its duration.
+    Features: fade-in/out per line, gold glow shadow, semi-transparent background pill.
+    """
+    if not segments:
+        return ""
+
+    parts = []
+
+    for seg in segments:
+        start = seg['start']
+        end   = seg['end']
+        text  = ffmpeg_escape(seg['text'])
+        dur   = max(end - start, 0.5)
+
+        # Fade each line: 0.3s in, 0.3s out (clipped to segment duration)
+        fade_dur = min(0.3, dur / 4)
+
+        # Alpha expression: fade in, hold, fade out
+        # Using between() for visibility window
+        alpha_expr = (
+            f"if(between(t,{start},{start+fade_dur}),"
+            f"(t-{start})/{fade_dur},"
+            f"if(between(t,{start+fade_dur},{end-fade_dur}),"
+            f"1,"
+            f"if(between(t,{end-fade_dur},{end}),"
+            f"({end}-t)/{fade_dur},"
+            f"0)))"
+        )
+
+        # ── Shadow / glow layer (gold blur effect) ─────────────────────────
+        glow = (
+            f"drawtext="
+            f"fontfile={font}:"
+            f"text='{text}':"
+            f"fontsize=52:"
+            f"fontcolor=0xFFD700@0.25:"
+            f"x=(w-text_w)/2:"
+            f"y=h*0.72:"
+            f"shadowcolor=0xD4AF37@0.5:shadowx=0:shadowy=0:"
+            f"alpha='{alpha_expr}'"
+        )
+
+        # ── Main text (crisp gold) ──────────────────────────────────────────
+        main = (
+            f"drawtext="
+            f"fontfile={font}:"
+            f"text='{text}':"
+            f"fontsize=48:"
+            f"fontcolor=0xFFD700@0.97:"
+            f"x=(w-text_w)/2:"
+            f"y=h*0.72:"
+            f"shadowcolor=0x000000@0.85:shadowx=2:shadowy=2:"
+            f"alpha='{alpha_expr}'"
+        )
+
+        parts.append(glow)
+        parts.append(main)
+
+    return ",".join(parts)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  VIDEO FILTER CHAIN
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_video_filter(duration, fps, font, lyrics_segments=None):
     frames      = int(duration * fps)
     fade_out_st = max(duration - 3, duration * 0.85)
 
-    # ── 1. SLOW CINEMATIC ZOOM (linear keyframe, 1.00 → 1.08) ─────────────────
+    # ── 1. SLOW CINEMATIC ZOOM ────────────────────────────────────────────────
     z_inc = 0.08 / max(frames, 1)
     zoom_filter = (
         f"scale=3840:2160:flags=lanczos,"
@@ -85,29 +269,15 @@ def build_video_filter(duration, fps, font):
         f"fps={fps}"
     )
 
-    # ── 2. LIGHT PULSE ANIMATION ───────────────────────────────────────────────
-    # Achieved via curves filter with time-varying brightness oscillation.
-    # We layer two effects:
-    #   a) Overall brightness pulse: gentle sine wave on all channels
-    #   b) Warm highlight boost: pushes highlights up/down to simulate lights
-    # FFmpeg 'curves' doesn't support time expressions, so we use 'colorbalance'
-    # and 'curves' chained with 'lutrgb' using 't' variable for time animation.
-    #
-    # BEST approach for light flicker: use 'eq' filter with time-based brightness
-    # eq=brightness expression + 'hue' saturation pulse = realistic light movement
-    #
-    # brightness oscillates: 0.0 ± 0.06 at ~0.7Hz (slow atmospheric pulse)
-    # contrast stays ~1.05 to pop the lights
-    # saturation pulses slightly: 1.0 ± 0.08 (makes warm lights glow warmer)
-
+    # ── 2. LIGHT PULSE ANIMATION ──────────────────────────────────────────────
     light_filter = (
         f"eq="
-        f"brightness='0.04*sin(t*2.2+0.3)':"       # slow brightness pulse
-        f"contrast='1.05+0.04*sin(t*1.8+1.0)':"    # contrast breathes
-        f"saturation='1.08+0.10*sin(t*2.5+0.8)'"   # saturation warms/cools
+        f"brightness='0.04*sin(t*2.2+0.3)':"
+        f"contrast='1.05+0.04*sin(t*1.8+1.0)':"
+        f"saturation='1.08+0.10*sin(t*2.5+0.8)'"
     )
 
-    # ── 3. WARM GRADE + VIGNETTE + GRAIN ──────────────────────────────────────
+    # ── 3. WARM GRADE + VIGNETTE + GRAIN ─────────────────────────────────────
     grade_filter = (
         f"curves="
         f"r='0/0 0.5/0.53 1/1':"
@@ -117,14 +287,16 @@ def build_video_filter(duration, fps, font):
         f"noise=alls=3:allf=t"
     )
 
-    # ── 4. FADE IN / OUT ───────────────────────────────────────────────────────
+    # ── 4. FADE IN / OUT ──────────────────────────────────────────────────────
     fade_filter = (
         f"fade=t=in:st=0:d=2,"
         f"fade=t=out:st={fade_out_st:.2f}:d=3"
     )
 
-    # ── 5. VIP WATERMARK — top right ──────────────────────────────────────────
-    # thin gold line / SORLUNE (serif glowing gold) / thin gold line
+    # ── 5. PIXEL FORMAT ───────────────────────────────────────────────────────
+    format_filter = "format=yuv420p"
+
+    # ── 6. VIP WATERMARK ─────────────────────────────────────────────────────
     m = 20
     top_line = (
         f"drawtext="
@@ -160,37 +332,15 @@ def build_video_filter(duration, fps, font):
     )
     watermark_filter = f"{top_line},{bot_line},{glow_text},{main_text}"
 
-    # ── 6. GLOWING EQUALIZER — center bottom, style like reference image ───────
-    #
-    # Reference image style:
-    #   - Many thin tall bars growing from a CENTER horizontal line (up AND down)
-    #   - Bright glowing core, fading toward edges
-    #   - Hot pink/magenta glow — we use GOLD to match Sorlune brand
-    #   - Bars are taller in center, shorter on edges (mountain shape envelope)
-    #
-    # Implementation:
-    #   - 21 bars (odd number = clean center bar)
-    #   - Each bar = TWO drawtext '|' chars: one going UP, one going DOWN
-    #   - Center horizontal line = drawtext box (thin gold line)
-    #   - Outer bars have lower amplitude (envelope shape)
-    #   - Each bar has unique frequency + phase for organic movement
-    #   - Center bars brighter (higher alpha), edge bars more transparent
-    #
-    # Bar center Y = h - 80 (80px from bottom = center line position)
-    # Bars grow symmetrically up and down from this center line.
+    # ── 7. GLOWING EQUALIZER ─────────────────────────────────────────────────
+    bar_count = 21
+    bar_gap   = 18
+    center_y  = "h-80"
+    max_amp   = 55
+    min_amp   = 12
+    half      = bar_count // 2
+    eq_parts  = []
 
-    bar_count   = 21          # total bars (must be odd for clean center)
-    bar_gap     = 18          # px between bar centers  (21 bars * 18 = 378px total)
-    center_y    = "h-80"      # center line Y position
-    max_amp     = 55          # max half-height of tallest bar (center)
-    min_amp     = 12          # min half-height of edge bars
-
-    # Envelope: bars near center are tallest
-    # amplitude[i] = min_amp + (max_amp - min_amp) * gaussian(i, center)
-    half  = bar_count // 2    # = 10
-    eq_parts = []
-
-    # Center horizontal glow line
     line_total_w = (bar_count - 1) * bar_gap + 4
     line_x       = f"(w/2-{line_total_w//2})"
     center_line  = (
@@ -203,91 +353,80 @@ def build_video_filter(duration, fps, font):
     )
     eq_parts.append(center_line)
 
-    # Frequencies and phases — varied for organic look
-    import math
     freqs  = [1.5, 2.1, 2.7, 1.9, 3.1, 2.4, 1.7, 2.9, 2.2, 3.5, 2.0,
               3.5, 2.2, 2.9, 1.7, 2.4, 3.1, 1.9, 2.7, 2.1, 1.5]
     phases = [0.0, 0.5, 1.1, 1.7, 0.3, 0.9, 1.5, 0.2, 0.8, 1.4, 0.6,
               1.4, 0.8, 0.2, 1.5, 0.9, 0.3, 1.7, 1.1, 0.5, 0.0]
 
     for i in range(bar_count):
-        # Gaussian envelope: center bars tallest
-        dist      = abs(i - half) / half          # 0.0 at center, 1.0 at edge
-        amplitude = min_amp + (max_amp - min_amp) * math.exp(-3.5 * dist * dist)
-        amplitude = int(amplitude)
+        dist      = abs(i - half) / half
+        amplitude = int(min_amp + (max_amp - min_amp) * math.exp(-3.5 * dist * dist))
+        alpha_up  = 0.75 - 0.35 * dist
+        alpha_dwn = 0.45 - 0.20 * dist
+        freq      = freqs[i]
+        phase     = phases[i]
+        offset    = (i - half) * bar_gap
+        bar_x     = f"(w/2+({offset})-tw/2)"
+        fs_expr   = f"{4}+{amplitude}*abs(sin(t*{freq}+{phase}))"
 
-        # Alpha: center bars brighter
-        alpha_up   = 0.75 - 0.35 * dist           # 0.75 center → 0.40 edge
-        alpha_down = 0.45 - 0.20 * dist           # dimmer going down
-
-        freq  = freqs[i]
-        phase = phases[i]
-
-        # X position (centered on screen)
-        offset = (i - half) * bar_gap
-        bar_x  = f"(w/2+({offset})-tw/2)"
-
-        fs_expr = f"{4}+{amplitude}*abs(sin(t*{freq}+{phase}))"
-
-        # UP bar: grows upward from center line
-        y_up = f"({center_y}-({4}+{amplitude}*abs(sin(t*{freq}+{phase}))))"
-
-        # DOWN bar: grows downward from center line
-        y_down = f"({center_y})"
-
-        fs_down = f"{3}+{max(4, amplitude//2)}*abs(sin(t*{freq}+{phase}+0.2))"
-        y_down_pos = f"({center_y})"
-
-        # UP bar
-        bar_up = (
+        up_bar = (
             f"drawtext="
             f"fontfile={font}:"
             f"text='|':"
-            f"fontsize='{fs_expr}':"
+            f"fontsize={fs_expr}:"
             f"fontcolor=0xD4AF37@{alpha_up:.2f}:"
             f"x={bar_x}:"
-            f"y={y_up}"
+            f"y=({center_y})-text_h:"
+            f"shadowcolor=0xFFE87C@0.4:shadowx=0:shadowy=0"
         )
-
-        # DOWN bar (shorter, dimmer — like the reference image lower half)
-        bar_down = (
+        down_bar = (
             f"drawtext="
             f"fontfile={font}:"
             f"text='|':"
-            f"fontsize='{fs_down}':"
-            f"fontcolor=0xC49A20@{alpha_down:.2f}:"
+            f"fontsize={fs_expr}:"
+            f"fontcolor=0xC49A20@{alpha_dwn:.2f}:"
             f"x={bar_x}:"
-            f"y={y_down_pos}"
+            f"y={center_y}:"
+            f"shadowcolor=0xFFE87C@0.2:shadowx=0:shadowy=0"
         )
-
-        eq_parts.append(bar_up)
-        eq_parts.append(bar_down)
+        eq_parts.append(up_bar)
+        eq_parts.append(down_bar)
 
     eq_filter = ",".join(eq_parts)
 
-    # ── COMBINE ALL ────────────────────────────────────────────────────────────
-    full_filter = (
-        f"{zoom_filter},"
-        f"{light_filter},"
-        f"{grade_filter},"
-        f"{fade_filter},"
-        f"format=yuv420p,"
-        f"{watermark_filter},"
-        f"{eq_filter}"
-    )
+    # ── 8. KARAOKE LYRICS (optional) ─────────────────────────────────────────
+    karaoke_filter = ""
+    if lyrics_segments:
+        karaoke_filter = build_karaoke_filter(lyrics_segments, font)
 
-    return full_filter
+    # ── ASSEMBLE FULL FILTER CHAIN ────────────────────────────────────────────
+    parts = [
+        zoom_filter,
+        light_filter,
+        grade_filter,
+        fade_filter,
+        format_filter,
+        watermark_filter,
+        eq_filter,
+    ]
+    if karaoke_filter:
+        parts.append(karaoke_filter)
+
+    return ",".join(parts)
 
 
-def generate_video_job(job_id, image_path, audio_path, output_path):
+# ══════════════════════════════════════════════════════════════════════════════
+#  CORE VIDEO GENERATION JOB
+# ══════════════════════════════════════════════════════════════════════════════
+
+def generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segments=None):
     try:
         jobs[job_id]['status'] = 'processing'
-
         duration = get_audio_duration(audio_path)
         fps      = 25
         font     = get_best_font()
 
-        video_filter = build_video_filter(duration, fps, font)
+        video_filter = build_video_filter(duration, fps, font, lyrics_segments)
 
         ffmpeg_cmd = [
             'ffmpeg', '-y',
@@ -312,7 +451,7 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
             jobs[job_id]['status'] = 'completed'
             jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
         else:
-            # ── FALLBACK ───────────────────────────────────────────────────────
+            # ── FALLBACK (simpler filter, no lyrics) ──────────────────────────
             jobs[job_id]['error'] = proc.stderr[-500:]
             frames  = int(duration * fps)
             z_inc   = 0.08 / max(frames, 1)
@@ -365,15 +504,31 @@ def generate_video_job(job_id, image_path, audio_path, output_path):
         jobs[job_id]['error'] = str(e)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  ROUTES
+# ══════════════════════════════════════════════════════════════════════════════
+
 @app.route('/generate', methods=['POST'])
 def generate_video():
+    """
+    POST /generate
+    Body (JSON):
+      - audio_url   : URL to MP3 audio  (required)
+      - image_url   : URL to JPG image  (required for long video)
+      - video_url   : URL to MP4 video  (required for short video)
+      - api_key     : your unique API key (required)
+      - lyrics      : plain text lyrics  (optional — enables karaoke mode)
+      - openai_key  : OpenAI API key     (optional — needed if lyrics provided)
+    """
     data = request.get_json()
     if not data:
         return jsonify({'error': 'No JSON data'}), 400
 
-    audio_url = data.get('audio_url')
-    image_url = data.get('image_url')
-    api_key   = data.get('api_key', 'default')
+    audio_url   = data.get('audio_url')
+    image_url   = data.get('image_url')
+    api_key     = data.get('api_key', 'default')
+    lyrics_text = data.get('lyrics', '').strip()
+    openai_key  = data.get('openai_key', '')
 
     if not audio_url or not image_url:
         return jsonify({'error': 'Missing audio_url or image_url'}), 400
@@ -393,9 +548,22 @@ def generate_video():
             for f in [image_path, audio_path, output_path]:
                 if os.path.exists(f):
                     os.remove(f)
+
             download_file(image_url, image_path)
             download_file(audio_url, audio_path)
-            generate_video_job(job_id, image_path, audio_path, output_path)
+
+            # ── AI LYRICS TIMING ───────────────────────────────────────────
+            lyrics_segments = []
+            if lyrics_text and openai_key:
+                try:
+                    duration = get_audio_duration(audio_path)
+                    jobs[job_id]['status'] = 'timing_lyrics'
+                    lyrics_segments = ai_time_lyrics(lyrics_text, duration, openai_key)
+                except Exception:
+                    lyrics_segments = []  # gracefully continue without lyrics
+
+            generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segments)
+
         except Exception as e:
             jobs[job_id]['status'] = 'error'
             jobs[job_id]['error'] = str(e)
@@ -404,7 +572,11 @@ def generate_video():
     thread.daemon = True
     thread.start()
 
-    return jsonify({'status': 'started', 'job_id': job_id}), 200
+    return jsonify({
+        'status': 'started',
+        'job_id': job_id,
+        'lyrics_mode': 'karaoke' if (lyrics_text and openai_key) else 'off'
+    }), 200
 
 
 @app.route('/status/<api_key>', methods=['GET'])
