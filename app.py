@@ -79,15 +79,7 @@ def get_best_font():
 #  REAL AUDIO TRANSCRIPTION WITH WHISPER
 # ══════════════════════════════════════════════════════════════════════════════
 
-def transcribe_lyrics_with_whisper(audio_path, openai_api_key):
-    """
-    Transcribe real sung audio using Whisper.
-    Returns:
-    [
-      {"start": 0.0, "end": 3.2, "text": "line text"},
-      ...
-    ]
-    """
+def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
     if not openai_api_key or not os.path.exists(audio_path):
         return []
 
@@ -112,19 +104,25 @@ def transcribe_lyrics_with_whisper(audio_path, openai_api_key):
             return []
 
         data = response.json()
-        segments = data.get("segments", [])
-        clean = []
+        whisper_segments = data.get("segments", [])
 
-        for seg in segments:
+        lyric_lines = [line.strip() for line in lyrics_text.splitlines() if line.strip()]
+        if not lyric_lines:
+            return []
+
+        clean = []
+        for i, seg in enumerate(whisper_segments):
+            if i >= len(lyric_lines):
+                break
+
             start = float(seg.get("start", 0))
             end = float(seg.get("end", start + 2))
-            text = str(seg.get("text", "")).strip()
 
-            if text and end > start:
+            if end > start:
                 clean.append({
                     "start": start,
                     "end": end,
-                    "text": text
+                    "text": lyric_lines[i]
                 })
 
         return clean
@@ -486,13 +484,13 @@ def generate_video():
             download_file(image_url, image_path)
             download_file(audio_url, audio_path)
 
-            lyrics_segments = []
-            if openai_key:
-                try:
-                    jobs[job_id]['status'] = 'transcribing_lyrics'
-                    lyrics_segments = transcribe_lyrics_with_whisper(audio_path, openai_key)
-                except Exception:
-                    lyrics_segments = []
+            llyrics_segments = []
+if openai_key and lyrics_text:
+    try:
+        jobs[job_id]['status'] = 'transcribing_lyrics'
+        lyrics_segments = transcribe_lyrics_with_whisper(audio_path, openai_key, lyrics_text)
+    except Exception:
+        lyrics_segments = []
 
             generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segments)
 
