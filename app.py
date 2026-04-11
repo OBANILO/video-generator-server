@@ -8,7 +8,6 @@ import time
 import json
 import math
 import re
-import tempfile
 
 app = Flask(__name__)
 
@@ -68,112 +67,21 @@ def get_best_font():
         if os.path.exists(path):
             return path
     result = subprocess.run(
-        ['fc-match', '-f', '%{file}', 'serif:bold'],
+        ['fc-match', '-f', '%{file}', 'sans:bold'],
         capture_output=True, text=True
     )
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
-    return candidates[-1]
+    return '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  AI LYRICS TIMING — GPT splits raw lyrics into timed segments
+#  REAL AUDIO TRANSCRIPTION WITH WHISPER
 # ══════════════════════════════════════════════════════════════════════════════
 
-
-    """
-    Send lyrics + audio duration to GPT-4o-mini.
-    Returns list of: [{"start": 0.0, "end": 4.5, "text": "Line 1"}, ...]
-    """
-    if not openai_api_key or not lyrics_text or not lyrics_text.strip():
-        return []
-
-    system_prompt = """You are a professional lyrics timing expert.
-Given a song's full lyrics and its total duration in seconds, split the lyrics into lines
-and assign realistic start/end timestamps (in seconds) to each line.
-
-Rules:
-- Each lyric segment should be 1-2 short lines max (max ~40 characters per line).
-- Space lines naturally — allow 0.3-0.8s gaps between segments for breathing.
-- Intro/outro: leave first 2s and last 3s without lyrics.
-- Verses flow at a medium pace; choruses can be slightly faster.
-- Return ONLY a valid JSON array. No explanation, no markdown, no code block.
-
-Format:
-[
-  {"start": 2.0, "end": 5.5, "text": "First line of lyrics"},
-  {"start": 6.2, "end": 10.0, "text": "Second line"},
-  ...
-]"""
-
-    user_prompt = f"""Total audio duration: {audio_duration:.1f} seconds
-
-Full lyrics:
-{lyrics_text}
-
-Generate the timed JSON array now."""
-
-    try:
-        response = requests.post(
-            'https://api.openai.com/v1/chat/completions',
-            headers={
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {openai_api_key}'
-            },
-            json={
-                'model': 'gpt-4o-mini',
-                'messages': [
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt}
-                ],
-                'temperature': 0.3,
-                'response_format': {'type': 'json_object'}
-            },
-            timeout=30
-        )
-
-        if response.status_code != 200:
-            return []
-
-        body = response.json()
-        raw = body['choices'][0]['message']['content']
-
-        # GPT might wrap in {"segments": [...]} or return array directly
-        parsed = json.loads(raw)
-        if isinstance(parsed, list):
-            segments = parsed
-        elif isinstance(parsed, dict):
-            # find the first list value
-            segments = next(
-                (v for v in parsed.values() if isinstance(v, list)),
-                []
-            )
-        else:
-            return []
-
-        # Validate and clean segments
-        clean = []
-        for seg in segments:
-            if not isinstance(seg, dict):
-                continue
-            start = float(seg.get('start', 0))
-            end   = float(seg.get('end', start + 3))
-            text  = str(seg.get('text', '')).strip()
-            if text and end > start and start >= 0 and end <= audio_duration + 1:
-                clean.append({'start': start, 'end': end, 'text': text})
-
-        return clean
-
-    except Exception:
-        return []
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  ESCAPE TEXT FOR FFMPEG drawtext
-# ══════════════════════════════════════════════════════════════════════════════
 def transcribe_lyrics_with_whisper(audio_path, openai_api_key):
     """
-    Transcribe the real sung audio with timestamps.
+    Transcribe real sung audio using Whisper.
     Returns:
     [
       {"start": 0.0, "end": 3.2, "text": "line text"},
@@ -224,17 +132,24 @@ def transcribe_lyrics_with_whisper(audio_path, openai_api_key):
     except Exception:
         return []
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ESCAPE TEXT FOR FFMPEG drawtext
+# ══════════════════════════════════════════════════════════════════════════════
+
 def ffmpeg_escape(text):
-    """Escape special chars for FFmpeg drawtext filter."""
     text = text.replace('\\', '\\\\')
-    text = text.replace("'",  "\u2019")   # replace apostrophe with right single quote (safer)
-    text = text.replace(':',  '\\:')
-    text = text.replace('%',  '\\%')
+    text = text.replace("'", "\u2019")
+    text = text.replace(':', '\\:')
+    text = text.replace('%', '\\%')
+    text = text.replace('[', '\\[')
+    text = text.replace(']', '\\]')
+    text = text.replace(',', '\\,')
     return text
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  KARAOKE LYRICS FILTER — one glowing gold line at a time, centered
+#  CLEAN SUBTITLE FILTER
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_karaoke_filter(segments, font):
@@ -266,10 +181,10 @@ def build_karaoke_filter(segments, font):
             f"text='{text}':"
             f"fontsize=36:"
             f"fontcolor=white:"
-            f"borderw=3:"
-            f"bordercolor=black@0.95:"
             f"x=(w-text_w)/2:"
             f"y=h*0.82:"
+            f"borderw=3:"
+            f"bordercolor=black@0.95:"
             f"alpha='{alpha_expr}'"
         )
 
@@ -283,10 +198,9 @@ def build_karaoke_filter(segments, font):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_video_filter(duration, fps, font, lyrics_segments=None):
-    frames      = int(duration * fps)
+    frames = int(duration * fps)
     fade_out_st = max(duration - 3, duration * 0.85)
 
-    # ── 1. SLOW CINEMATIC ZOOM ────────────────────────────────────────────────
     z_inc = 0.08 / max(frames, 1)
     zoom_filter = (
         f"scale=3840:2160:flags=lanczos,"
@@ -299,7 +213,6 @@ def build_video_filter(duration, fps, font, lyrics_segments=None):
         f"fps={fps}"
     )
 
-    # ── 2. LIGHT PULSE ANIMATION ──────────────────────────────────────────────
     light_filter = (
         f"eq="
         f"brightness='0.04*sin(t*2.2+0.3)':"
@@ -307,7 +220,6 @@ def build_video_filter(duration, fps, font, lyrics_segments=None):
         f"saturation='1.08+0.10*sin(t*2.5+0.8)'"
     )
 
-    # ── 3. WARM GRADE + VIGNETTE + GRAIN ─────────────────────────────────────
     grade_filter = (
         f"curves="
         f"r='0/0 0.5/0.53 1/1':"
@@ -317,16 +229,13 @@ def build_video_filter(duration, fps, font, lyrics_segments=None):
         f"noise=alls=3:allf=t"
     )
 
-    # ── 4. FADE IN / OUT ──────────────────────────────────────────────────────
     fade_filter = (
         f"fade=t=in:st=0:d=2,"
         f"fade=t=out:st={fade_out_st:.2f}:d=3"
     )
 
-    # ── 5. PIXEL FORMAT ───────────────────────────────────────────────────────
     format_filter = "format=yuv420p"
 
-    # ── 6. VIP WATERMARK ─────────────────────────────────────────────────────
     m = 20
     top_line = (
         f"drawtext="
@@ -362,18 +271,17 @@ def build_video_filter(duration, fps, font, lyrics_segments=None):
     )
     watermark_filter = f"{top_line},{bot_line},{glow_text},{main_text}"
 
-    # ── 7. GLOWING EQUALIZER ─────────────────────────────────────────────────
     bar_count = 21
-    bar_gap   = 18
-    center_y  = "h-80"
-    max_amp   = 55
-    min_amp   = 12
-    half      = bar_count // 2
-    eq_parts  = []
+    bar_gap = 18
+    center_y = "h-80"
+    max_amp = 55
+    min_amp = 12
+    half = bar_count // 2
+    eq_parts = []
 
     line_total_w = (bar_count - 1) * bar_gap + 4
-    line_x       = f"(w/2-{line_total_w//2})"
-    center_line  = (
+    line_x = f"(w/2-{line_total_w//2})"
+    center_line = (
         f"drawtext="
         f"fontfile={font}:"
         f"text='{'─' * 42}':"
@@ -383,21 +291,21 @@ def build_video_filter(duration, fps, font, lyrics_segments=None):
     )
     eq_parts.append(center_line)
 
-    freqs  = [1.5, 2.1, 2.7, 1.9, 3.1, 2.4, 1.7, 2.9, 2.2, 3.5, 2.0,
-              3.5, 2.2, 2.9, 1.7, 2.4, 3.1, 1.9, 2.7, 2.1, 1.5]
+    freqs = [1.5, 2.1, 2.7, 1.9, 3.1, 2.4, 1.7, 2.9, 2.2, 3.5, 2.0,
+             3.5, 2.2, 2.9, 1.7, 2.4, 3.1, 1.9, 2.7, 2.1, 1.5]
     phases = [0.0, 0.5, 1.1, 1.7, 0.3, 0.9, 1.5, 0.2, 0.8, 1.4, 0.6,
               1.4, 0.8, 0.2, 1.5, 0.9, 0.3, 1.7, 1.1, 0.5, 0.0]
 
     for i in range(bar_count):
-        dist      = abs(i - half) / half
+        dist = abs(i - half) / half
         amplitude = int(min_amp + (max_amp - min_amp) * math.exp(-3.5 * dist * dist))
-        alpha_up  = 0.75 - 0.35 * dist
+        alpha_up = 0.75 - 0.35 * dist
         alpha_dwn = 0.45 - 0.20 * dist
-        freq      = freqs[i]
-        phase     = phases[i]
-        offset    = (i - half) * bar_gap
-        bar_x     = f"(w/2+({offset})-tw/2)"
-        fs_expr   = f"{4}+{amplitude}*abs(sin(t*{freq}+{phase}))"
+        freq = freqs[i]
+        phase = phases[i]
+        offset = (i - half) * bar_gap
+        bar_x = f"(w/2+({offset})-tw/2)"
+        fs_expr = f"{4}+{amplitude}*abs(sin(t*{freq}+{phase}))"
 
         up_bar = (
             f"drawtext="
@@ -424,12 +332,10 @@ def build_video_filter(duration, fps, font, lyrics_segments=None):
 
     eq_filter = ",".join(eq_parts)
 
-    # ── 8. KARAOKE LYRICS (optional) ─────────────────────────────────────────
     karaoke_filter = ""
     if lyrics_segments:
         karaoke_filter = build_karaoke_filter(lyrics_segments, font)
 
-    # ── ASSEMBLE FULL FILTER CHAIN ────────────────────────────────────────────
     parts = [
         zoom_filter,
         light_filter,
@@ -453,8 +359,8 @@ def generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segme
     try:
         jobs[job_id]['status'] = 'processing'
         duration = get_audio_duration(audio_path)
-        fps      = 25
-        font     = get_best_font()
+        fps = 25
+        font = get_best_font()
 
         video_filter = build_video_filter(duration, fps, font, lyrics_segments)
 
@@ -481,10 +387,9 @@ def generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segme
             jobs[job_id]['status'] = 'completed'
             jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
         else:
-            # ── FALLBACK (simpler filter, no lyrics) ──────────────────────────
             jobs[job_id]['error'] = proc.stderr[-500:]
-            frames  = int(duration * fps)
-            z_inc   = 0.08 / max(frames, 1)
+            frames = int(duration * fps)
+            z_inc = 0.08 / max(frames, 1)
             fade_st = max(duration - 3, duration * 0.85)
 
             fallback_filter = (
@@ -543,32 +448,31 @@ def generate_video():
     """
     POST /generate
     Body (JSON):
-      - audio_url   : URL to MP3 audio  (required)
-      - image_url   : URL to JPG image  (required for long video)
-      - video_url   : URL to MP4 video  (required for short video)
-      - api_key     : your unique API key (required)
-      - lyrics      : plain text lyrics  (optional — enables karaoke mode)
-      - openai_key  : OpenAI API key     (optional — needed if lyrics provided)
+      - audio_url   : URL to MP3 audio
+      - image_url   : URL to JPG image
+      - api_key     : unique API key
+      - lyrics      : optional plain lyrics (not used for timing anymore)
+      - openai_key  : OpenAI API key for Whisper
     """
     data = request.get_json()
     if not data:
         return jsonify({'error': 'No JSON data'}), 400
 
-    audio_url   = data.get('audio_url')
-    image_url   = data.get('image_url')
-    api_key     = data.get('api_key', 'default')
+    audio_url = data.get('audio_url')
+    image_url = data.get('image_url')
+    api_key = data.get('api_key', 'default')
     lyrics_text = data.get('lyrics', '').strip()
-    openai_key  = data.get('openai_key', '')
+    openai_key = data.get('openai_key', '')
 
     if not audio_url or not image_url:
         return jsonify({'error': 'Missing audio_url or image_url'}), 400
 
-    job_id     = api_key
+    job_id = api_key
     job_folder = os.path.join(UPLOAD_FOLDER, job_id)
     os.makedirs(job_folder, exist_ok=True)
 
-    image_path  = os.path.join(job_folder, 'image.jpg')
-    audio_path  = os.path.join(job_folder, 'audio.mp3')
+    image_path = os.path.join(job_folder, 'image.jpg')
+    audio_path = os.path.join(job_folder, 'audio.mp3')
     output_path = os.path.join(job_folder, f'{job_id}.mp4')
 
     jobs[job_id] = {'status': 'pending', 'video_url': None}
@@ -582,14 +486,13 @@ def generate_video():
             download_file(image_url, image_path)
             download_file(audio_url, audio_path)
 
-            # ── REAL AUDIO TRANSCRIPTION ──────────────────────────────────
-lyrics_segments = []
-if openai_key:
-    try:
-        jobs[job_id]['status'] = 'transcribing_lyrics'
-        lyrics_segments = transcribe_lyrics_with_whisper(audio_path, openai_key)
-    except Exception:
-        lyrics_segments = []
+            lyrics_segments = []
+            if openai_key:
+                try:
+                    jobs[job_id]['status'] = 'transcribing_lyrics'
+                    lyrics_segments = transcribe_lyrics_with_whisper(audio_path, openai_key)
+                except Exception:
+                    lyrics_segments = []
 
             generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segments)
 
@@ -604,7 +507,8 @@ if openai_key:
     return jsonify({
         'status': 'started',
         'job_id': job_id,
-        'lyrics_mode': 'karaoke' if (lyrics_text and openai_key) else 'off'
+        'lyrics_mode': 'whisper' if openai_key else 'off',
+        'lyrics_supplied': bool(lyrics_text)
     }), 200
 
 
@@ -633,7 +537,7 @@ def serve_video(job_id, filename):
 
 @app.route('/clear-cache', methods=['POST'])
 def clear_cache():
-    data    = request.get_json()
+    data = request.get_json()
     api_key = data.get('api_key') if data else None
     if api_key and api_key in jobs:
         del jobs[api_key]
@@ -651,7 +555,7 @@ def process_audio():
     if not data:
         return jsonify({'error': 'No JSON data'}), 400
 
-    audio_url        = data.get('url')
+    audio_url = data.get('url')
     segment_duration = int(data.get('segment_duration', 60))
 
     if not audio_url:
@@ -677,13 +581,13 @@ def process_audio():
     except Exception:
         return jsonify({'error': 'Could not read audio duration'}), 500
 
-    segments  = []
-    start     = 0
+    segments = []
+    start = 0
     seg_index = 0
 
     while start < total_duration:
         seg_filename = f'{session_id}_seg{seg_index:03d}.mp3'
-        seg_path     = os.path.join(AUDIO_SEGMENTS_FOLDER, seg_filename)
+        seg_path = os.path.join(AUDIO_SEGMENTS_FOLDER, seg_filename)
 
         ffmpeg_cmd = [
             'ffmpeg', '-y',
@@ -699,7 +603,7 @@ def process_audio():
         if proc.returncode == 0 and os.path.exists(seg_path):
             segments.append(seg_filename)
 
-        start     += segment_duration
+        start += segment_duration
         seg_index += 1
 
     os.remove(audio_path)
