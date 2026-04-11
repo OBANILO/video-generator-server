@@ -7,7 +7,6 @@ import threading
 import time
 import json
 import math
-import re
 
 app = Flask(__name__)
 
@@ -21,7 +20,7 @@ os.makedirs(AUDIO_SEGMENTS_FOLDER, exist_ok=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  UTILITIES
+# UTILITIES
 # ══════════════════════════════════════════════════════════════════════════════
 
 def download_file(url, dest_path):
@@ -54,33 +53,60 @@ def get_audio_duration(audio_path):
 
 def get_best_font():
     candidates = [
-        '/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf',
-        '/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf',
-        '/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf',
-        '/usr/share/fonts/truetype/noto/NotoSerif-Bold.ttf',
-        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
         '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
         '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
         '/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf',
     ]
     for path in candidates:
         if os.path.exists(path):
             return path
+
     result = subprocess.run(
         ['fc-match', '-f', '%{file}', 'sans:bold'],
         capture_output=True, text=True
     )
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
+
     return '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  REAL AUDIO TRANSCRIPTION WITH WHISPER
+# LYRICS + WHISPER TIMING
 # ══════════════════════════════════════════════════════════════════════════════
 
+def split_lyrics_lines(lyrics_text):
+    if not lyrics_text:
+        return []
+
+    raw_lines = lyrics_text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    lines = []
+
+    for line in raw_lines:
+        clean = line.strip()
+        if not clean:
+            continue
+
+        # skip section labels like [Verse], [Chorus]
+        if clean.startswith('[') and clean.endswith(']'):
+            continue
+
+        lines.append(clean)
+
+    return lines
+
+
 def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
+    """
+    Whisper gives timing.
+    Displayed text comes from user's own lyrics lines.
+    """
     if not openai_api_key or not os.path.exists(audio_path):
+        return []
+
+    lyric_lines = split_lyrics_lines(lyrics_text)
+    if not lyric_lines:
         return []
 
     try:
@@ -95,7 +121,8 @@ def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
                 },
                 data={
                     "model": "whisper-1",
-                    "response_format": "verbose_json"
+                    "response_format": "verbose_json",
+                    "language": "en"
                 },
                 timeout=300
             )
@@ -105,34 +132,63 @@ def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
 
         data = response.json()
         whisper_segments = data.get("segments", [])
-
-        lyric_lines = [line.strip() for line in lyrics_text.splitlines() if line.strip()]
-        if not lyric_lines:
+        if not whisper_segments:
             return []
 
-        clean = []
-        for i, seg in enumerate(whisper_segments):
-            if i >= len(lyric_lines):
-                break
+        clean_segments = []
+        usable_segments = []
 
+        for seg in whisper_segments:
             start = float(seg.get("start", 0))
             end = float(seg.get("end", start + 2))
+            spoken = str(seg.get("text", "")).strip()
 
-            if end > start:
-                clean.append({
+            if end > start and spoken:
+                usable_segments.append({
                     "start": start,
-                    "end": end,
-                    "text": lyric_lines[i]
+                    "end": end
                 })
 
-        return clean
+        if not usable_segments:
+            return []
+
+        # If there are more lyric lines than whisper segments,
+        # spread lyrics across full duration.
+        if len(lyric_lines) > len(usable_segments):
+            total_start = usable_segments[0]["start"]
+            total_end = usable_segments[-1]["end"]
+            total_duration = max(total_end - total_start, 1.0)
+            step = total_duration / len(lyric_lines)
+
+            for i, line in enumerate(lyric_lines):
+                start = total_start + (i * step)
+                end = total_start + ((i + 1) * step)
+                clean_segments.append({
+                    "start": round(start, 2),
+                    "end": round(end, 2),
+                    "text": line
+                })
+
+            return clean_segments
+
+        # If whisper segments are more than lyric lines,
+        # map one lyric line to one segment.
+        for i, line in enumerate(lyric_lines):
+            seg = usable_segments[i]
+            clean_segments.append({
+                "start": seg["start"],
+                "end": seg["end"],
+                "text": line
+            })
+
+        return clean_segments
 
     except Exception:
         return []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ESCAPE TEXT FOR FFMPEG drawtext
+# FFMPEG TEXT ESCAPE
 # ══════════════════════════════════════════════════════════════════════════════
 
 def ffmpeg_escape(text):
@@ -147,7 +203,7 @@ def ffmpeg_escape(text):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CLEAN SUBTITLE FILTER
+# SUBTITLE FILTER
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_karaoke_filter(segments, font):
@@ -161,7 +217,7 @@ def build_karaoke_filter(segments, font):
         end = seg["end"]
         text = ffmpeg_escape(seg["text"])
         dur = max(end - start, 0.5)
-        fade_dur = min(0.25, dur / 4)
+        fade_dur = min(0.20, dur / 4)
 
         alpha_expr = (
             f"if(between(t,{start},{start+fade_dur}),"
@@ -175,14 +231,14 @@ def build_karaoke_filter(segments, font):
 
         main = (
             f"drawtext="
-            f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
+            f"fontfile={font}:"
             f"text='{text}':"
-            f"fontsize=36:"
+            f"fontsize=42:"
             f"fontcolor=white:"
-            f"x=(w-text_w)/2:"
-            f"y=h*0.82:"
-            f"borderw=3:"
+            f"borderw=4:"
             f"bordercolor=black@0.95:"
+            f"x=(w-text_w)/2:"
+            f"y=h*0.78:"
             f"alpha='{alpha_expr}'"
         )
 
@@ -192,7 +248,7 @@ def build_karaoke_filter(segments, font):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  VIDEO FILTER CHAIN
+# VIDEO FILTER CHAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_video_filter(duration, fps, font, lyrics_segments=None):
@@ -234,6 +290,7 @@ def build_video_filter(duration, fps, font, lyrics_segments=None):
 
     format_filter = "format=yuv420p"
 
+    # watermark
     m = 20
     top_line = (
         f"drawtext="
@@ -269,6 +326,7 @@ def build_video_filter(duration, fps, font, lyrics_segments=None):
     )
     watermark_filter = f"{top_line},{bot_line},{glow_text},{main_text}"
 
+    # equalizer
     bar_count = 21
     bar_gap = 18
     center_y = "h-80"
@@ -343,6 +401,7 @@ def build_video_filter(duration, fps, font, lyrics_segments=None):
         watermark_filter,
         eq_filter,
     ]
+
     if karaoke_filter:
         parts.append(karaoke_filter)
 
@@ -350,7 +409,7 @@ def build_video_filter(duration, fps, font, lyrics_segments=None):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CORE VIDEO GENERATION JOB
+# CORE VIDEO GENERATION
 # ══════════════════════════════════════════════════════════════════════════════
 
 def generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segments=None):
@@ -385,52 +444,8 @@ def generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segme
             jobs[job_id]['status'] = 'completed'
             jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
         else:
-            jobs[job_id]['error'] = proc.stderr[-500:]
-            frames = int(duration * fps)
-            z_inc = 0.08 / max(frames, 1)
-            fade_st = max(duration - 3, duration * 0.85)
-
-            fallback_filter = (
-                f"scale=1920:1080:flags=lanczos,"
-                f"zoompan="
-                f"z='min(1.00+{z_inc:.8f}*on,1.08)':"
-                f"x='iw/2-(iw/zoom/2)':"
-                f"y='ih/2-(ih/zoom/2)':"
-                f"d={frames}:s=1280x720:fps={fps},"
-                f"eq=brightness='0.04*sin(t*2.2)':saturation='1.08+0.10*sin(t*2.5)',"
-                f"fade=t=in:st=0:d=2,"
-                f"fade=t=out:st={fade_st:.2f}:d=3,"
-                f"drawtext="
-                f"fontfile={font}:"
-                f"text='SORLUNE':"
-                f"fontsize=22:fontcolor=0xD4AF37@0.97:"
-                f"x=w-tw-20:y=28:"
-                f"shadowcolor=0x000000@0.95:shadowx=1:shadowy=1,"
-                f"format=yuv420p"
-            )
-            ffmpeg_fb = [
-                'ffmpeg', '-y',
-                '-loop', '1',
-                '-i', image_path,
-                '-i', audio_path,
-                '-vf', fallback_filter,
-                '-c:v', 'libx264',
-                '-preset', 'ultrafast',
-                '-crf', '20',
-                '-c:a', 'aac',
-                '-b:a', '192k',
-                '-pix_fmt', 'yuv420p',
-                '-t', str(duration),
-                '-shortest',
-                output_path
-            ]
-            proc_fb = subprocess.run(ffmpeg_fb, capture_output=True, text=True, timeout=3600)
-            if proc_fb.returncode == 0 and os.path.exists(output_path):
-                jobs[job_id]['status'] = 'completed'
-                jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
-            else:
-                jobs[job_id]['status'] = 'error'
-                jobs[job_id]['error'] = proc_fb.stderr[-500:]
+            jobs[job_id]['status'] = 'error'
+            jobs[job_id]['error'] = proc.stderr[-1200:]
 
     except Exception as e:
         jobs[job_id]['status'] = 'error'
@@ -438,20 +453,11 @@ def generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segme
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ROUTES
+# ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.route('/generate', methods=['POST'])
 def generate_video():
-    """
-    POST /generate
-    Body (JSON):
-      - audio_url   : URL to MP3 audio
-      - image_url   : URL to JPG image
-      - api_key     : unique API key
-      - lyrics      : optional plain lyrics (not used for timing anymore)
-      - openai_key  : OpenAI API key for Whisper
-    """
     data = request.get_json()
     if not data:
         return jsonify({'error': 'No JSON data'}), 400
@@ -460,7 +466,7 @@ def generate_video():
     image_url = data.get('image_url')
     api_key = data.get('api_key', 'default')
     lyrics_text = data.get('lyrics', '').strip()
-    openai_key = data.get('openai_key', '')
+    openai_key = data.get('openai_key', '').strip()
 
     if not audio_url or not image_url:
         return jsonify({'error': 'Missing audio_url or image_url'}), 400
@@ -481,16 +487,41 @@ def generate_video():
                 if os.path.exists(f):
                     os.remove(f)
 
+            jobs[job_id]['status'] = 'downloading_assets'
             download_file(image_url, image_path)
             download_file(audio_url, audio_path)
 
-            llyrics_segments = []
-if openai_key and lyrics_text:
-    try:
-        jobs[job_id]['status'] = 'transcribing_lyrics'
-        lyrics_segments = transcribe_lyrics_with_whisper(audio_path, openai_key, lyrics_text)
-    except Exception:
-        lyrics_segments = []
+            lyrics_segments = []
+            if openai_key and lyrics_text:
+                try:
+                    jobs[job_id]['status'] = 'transcribing_lyrics'
+                    lyrics_segments = transcribe_lyrics_with_whisper(
+                        audio_path,
+                        openai_key,
+                        lyrics_text
+                    )
+                except Exception:
+                    lyrics_segments = []
+
+            if not lyrics_segments and lyrics_text:
+                # fallback: evenly spread lyrics across full duration
+                duration = get_audio_duration(audio_path)
+                lines = split_lyrics_lines(lyrics_text)
+
+                if lines:
+                    step = max(duration / len(lines), 1.0)
+                    lyrics_segments = []
+                    current = 0.0
+
+                    for line in lines:
+                        start = current
+                        end = min(current + step, duration)
+                        lyrics_segments.append({
+                            "start": round(start, 2),
+                            "end": round(end, 2),
+                            "text": line
+                        })
+                        current += step
 
             generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segments)
 
@@ -505,8 +536,7 @@ if openai_key and lyrics_text:
     return jsonify({
         'status': 'started',
         'job_id': job_id,
-        'lyrics_mode': 'whisper' if openai_key else 'off',
-        'lyrics_supplied': bool(lyrics_text)
+        'lyrics_mode': 'custom_lyrics_with_whisper_timing' if (openai_key and lyrics_text) else 'fallback'
     }), 200
 
 
@@ -537,13 +567,16 @@ def serve_video(job_id, filename):
 def clear_cache():
     data = request.get_json()
     api_key = data.get('api_key') if data else None
+
     if api_key and api_key in jobs:
         del jobs[api_key]
+
     if api_key:
         import shutil
         job_folder = os.path.join(UPLOAD_FOLDER, api_key)
         if os.path.exists(job_folder):
             shutil.rmtree(job_folder, ignore_errors=True)
+
     return jsonify({'status': 'cleared'}), 200
 
 
