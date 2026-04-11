@@ -306,16 +306,48 @@ def ffmpeg_escape(text):
 # SUBTITLE FILTER
 # ══════════════════════════════════════════════════════════════════════════════
 
+def wrap_lyric_line(text, max_chars=35):
+    """
+    Split a long lyric line into multiple shorter lines
+    so they fit within the video frame.
+    Returns a list of strings (1 or 2 lines).
+    """
+    if len(text) <= max_chars:
+        return [text]
+
+    # Try to split at a space near the middle
+    words = text.split()
+    best_split = len(words) // 2
+    best_diff = float('inf')
+
+    for i in range(1, len(words)):
+        part1 = " ".join(words[:i])
+        part2 = " ".join(words[i:])
+        diff = abs(len(part1) - len(part2))
+        if diff < best_diff and len(part1) <= max_chars and len(part2) <= max_chars:
+            best_diff = diff
+            best_split = i
+
+    part1 = " ".join(words[:best_split])
+    part2 = " ".join(words[best_split:])
+
+    # If part2 is still too long, just return two lines anyway
+    return [part1, part2]
+
+
 def build_karaoke_filter(segments, font):
     if not segments:
         return ""
 
     parts = []
+    FONT_SIZE = 34        # smaller font fits more text
+    LINE_HEIGHT = 44      # pixel gap between wrapped lines
+    MAX_CHARS = 38        # max chars per line before wrapping
 
     for seg in segments:
         start = seg["start"]
         end = seg["end"]
-        text = ffmpeg_escape(seg["text"])
+        raw_text = seg["text"]
         dur = max(end - start, 0.5)
         fade_dur = min(0.20, dur / 4)
 
@@ -329,20 +361,42 @@ def build_karaoke_filter(segments, font):
             f"0)))"
         )
 
-        main = (
-            f"drawtext="
-            f"fontfile={font}:"
-            f"text='{text}':"
-            f"fontsize=42:"
-            f"fontcolor=white:"
-            f"borderw=4:"
-            f"bordercolor=black@0.95:"
-            f"x=(w-text_w)/2:"
-            f"y=h*0.78:"
-            f"alpha='{alpha_expr}'"
-        )
+        lines = wrap_lyric_line(raw_text, max_chars=MAX_CHARS)
 
-        parts.append(main)
+        if len(lines) == 1:
+            # Single line — centered at 78% height
+            text = ffmpeg_escape(lines[0])
+            main = (
+                f"drawtext="
+                f"fontfile={font}:"
+                f"text='{text}':"
+                f"fontsize={FONT_SIZE}:"
+                f"fontcolor=white:"
+                f"borderw=3:"
+                f"bordercolor=black@0.95:"
+                f"x=(w-text_w)/2:"
+                f"y=h*0.78:"
+                f"alpha='{alpha_expr}'"
+            )
+            parts.append(main)
+        else:
+            # Two lines — stack them centered, slightly higher
+            for li, line in enumerate(lines):
+                text = ffmpeg_escape(line)
+                y_pos = f"h*0.76+{li * LINE_HEIGHT}"
+                row = (
+                    f"drawtext="
+                    f"fontfile={font}:"
+                    f"text='{text}':"
+                    f"fontsize={FONT_SIZE}:"
+                    f"fontcolor=white:"
+                    f"borderw=3:"
+                    f"bordercolor=black@0.95:"
+                    f"x=(w-text_w)/2:"
+                    f"y={y_pos}:"
+                    f"alpha='{alpha_expr}'"
+                )
+                parts.append(row)
 
     return ",".join(parts)
 
