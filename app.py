@@ -19,7 +19,6 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 AUDIO_SEGMENTS_FOLDER = '/tmp/audio_segments'
 os.makedirs(AUDIO_SEGMENTS_FOLDER, exist_ok=True)
 
-# Icon assets — in root folder next to app.py
 ICON_DIR = '/tmp/social_icons'
 os.makedirs(ICON_DIR, exist_ok=True)
 
@@ -86,14 +85,17 @@ def get_audio_duration(audio_path):
 
 
 def get_best_font():
+    """Try to find a clean, modern sans-serif bold font."""
     candidates = [
-        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
-        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
-        '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
         '/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+        '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
+        '/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf',
     ]
     for path in candidates:
         if os.path.exists(path):
+            print(f"[Font] Using: {path}")
             return path
     result = subprocess.run(
         ['fc-match', '-f', '%{file}', 'sans:bold'],
@@ -156,7 +158,7 @@ def normalize_word(w):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WHISPER ALIGNMENT
+# WHISPER ALIGNMENT  — improved sync
 # ══════════════════════════════════════════════════════════════════════════════
 
 def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
@@ -183,14 +185,14 @@ def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
             )
 
         if response.status_code != 200:
-            print(f"[Whisper] API error: {response.status_code}")
+            print(f"[Whisper] API error: {response.status_code} — {response.text[:300]}")
             return []
 
         data  = response.json()
         words = data.get("words", [])
 
         if words and len(words) > 3:
-            print(f"[Whisper] Got {len(words)} word timestamps")
+            print(f"[Whisper] Got {len(words)} word timestamps — using word alignment")
             return _align_by_word_timestamps(lyric_lines, words)
 
         segments = data.get("segments", [])
@@ -206,6 +208,10 @@ def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
 
 
 def _align_by_word_timestamps(lyric_lines, whisper_words):
+    """
+    Improved alignment: sequential scan with small look-ahead window,
+    prevents words from being reused, enforces forward-only movement.
+    """
     wwords = []
     for w in whisper_words:
         txt = w.get("word", "").strip()
@@ -231,24 +237,26 @@ def _align_by_word_timestamps(lyric_lines, whisper_words):
         if not line_words:
             continue
 
+        # All words exhausted — extrapolate timing from last segment
         if word_cursor >= total_words:
             last_end = result[-1]["end"] if result else 0
             result.append({
-                "start": round(last_end + 0.3, 2),
-                "end":   round(last_end + 0.3 + line_word_count * 0.4, 2),
+                "start": round(last_end + 0.2, 2),
+                "end":   round(last_end + 0.2 + max(line_word_count * 0.35, 1.5), 2),
                 "text":  line
             })
             continue
 
-        search_limit   = min(word_cursor + line_word_count * 3 + 20, total_words)
+        # Look-ahead window: search up to 3× the line word count beyond cursor
+        search_limit = min(word_cursor + max(line_word_count * 4, 20), total_words)
         best_score     = -1.0
         best_start_idx = word_cursor
         best_end_idx   = min(word_cursor + line_word_count, total_words)
         lyric_set      = set(line_words)
 
         for start_i in range(word_cursor, search_limit):
-            min_w = max(1, line_word_count - line_word_count // 2)
-            max_w = min(line_word_count + line_word_count // 2 + 3, total_words - start_i)
+            min_w = max(1, line_word_count - 2)
+            max_w = min(line_word_count + 3, total_words - start_i)
             for w_len in range(min_w, max_w + 1):
                 end_i = start_i + w_len
                 if end_i > total_words:
@@ -262,33 +270,41 @@ def _align_by_word_timestamps(lyric_lines, whisper_words):
                     best_start_idx = start_i
                     best_end_idx   = end_i
 
-        if best_score >= 0.30:
+        if best_score >= 0.25:
             seg      = wwords[best_start_idx:best_end_idx]
-            seg_start, seg_end = seg[0]["start"], seg[-1]["end"]
+            seg_start = seg[0]["start"]
+            seg_end   = seg[-1]["end"]
             word_cursor = best_end_idx
         else:
+            # Fallback: evenly distribute remaining words across remaining lines
             rem_lines = len(lyric_lines) - line_idx
             rem_words = total_words - word_cursor
             wpl       = max(1, rem_words // rem_lines)
             end_idx   = min(word_cursor + wpl, total_words)
             seg       = wwords[word_cursor:end_idx]
             if seg:
-                seg_start, seg_end = seg[0]["start"], seg[-1]["end"]
+                seg_start = seg[0]["start"]
+                seg_end   = seg[-1]["end"]
             elif result:
-                seg_start = result[-1]["end"] + 0.3
-                seg_end   = seg_start + line_word_count * 0.4
+                seg_start = result[-1]["end"] + 0.2
+                seg_end   = seg_start + max(line_word_count * 0.35, 1.5)
             else:
-                seg_start, seg_end = 0.0, line_word_count * 0.4
+                seg_start = 0.0
+                seg_end   = max(line_word_count * 0.35, 1.5)
             word_cursor = end_idx
 
-        min_dur = max(1.5, line_word_count * 0.35)
+        # Ensure minimum display duration per line
+        min_dur = max(1.8, line_word_count * 0.30)
         if seg_end - seg_start < min_dur:
             seg_end = seg_start + min_dur
 
+        # Never overlap previous segment
         if result and seg_start < result[-1]["end"]:
             seg_start = result[-1]["end"] + 0.05
+            seg_end   = max(seg_end, seg_start + min_dur)
 
         result.append({"start": round(seg_start, 2), "end": round(seg_end, 2), "text": line})
+        print(f"[Align] Line {line_idx:02d} [{seg_start:.2f}→{seg_end:.2f}] score={best_score:.2f}: {line[:50]}")
 
     return result
 
@@ -334,7 +350,7 @@ def _align_by_segment_timestamps(lyric_lines, whisper_segments):
             for k, li in enumerate(idxs):
                 s = seg["start"] + k * step
                 e = seg["start"] + (k + 1) * step
-                line_timings[li] = (round(s, 2), round(max(e, s + 1.5), 2))
+                line_timings[li] = (round(s, 2), round(max(e, s + 1.8), 2))
 
         last_end = segs[-1]["end"]
         for i in range(len(lyric_lines)):
@@ -370,12 +386,34 @@ def ffmpeg_escape(text):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# KARAOKE LYRICS FILTER
-# Lyrics appear in the UPPER half of the video (y=40% from top)
-# so they never overlap with the title block at the bottom
+# LAYOUT CONSTANTS
+# ─────────────────────────────────────────────────────────────────────────────
+#  0%  ┌──────────────────────────┐
+#      │   artist image / scene  │
+#  62% ├──────────────────────────┤  ← dark overlay starts
+#      │   EQ soundbar            │  63-66%
+#      │   ── gold line ──        │  67%
+#      │   SONG TITLE             │  68-74%
+#      │   artist name (gold)     │  77-80%
+#      │   ── gold line ──        │  82%
+#      │   LYRICS (subtitle bar)  │  83-91%
+# 100% └──────────────────────────┘
 # ══════════════════════════════════════════════════════════════════════════════
 
-def wrap_lyric_line(text, max_chars=38):
+LYRICS_Y_TOP    = 0.83   # lyrics text baseline
+EQ_CENTER_Y     = 0.635  # EQ bar center
+TITLE_SEPARATOR = 0.665  # gold line above title
+TITLE_Y         = 0.675  # song title
+ARTIST_Y        = 0.770  # artist name
+LYRICS_SEP_Y    = 0.820  # gold line above lyrics
+DARK_START      = 0.620  # dark overlay begins
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# KARAOKE LYRICS FILTER  — BOTTOM of video (subtitle style)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def wrap_lyric_line(text, max_chars=42):
     if len(text) <= max_chars:
         return [text]
     words      = text.split()
@@ -390,18 +428,23 @@ def wrap_lyric_line(text, max_chars=38):
 
 
 def build_karaoke_filter(segments, font):
+    """
+    Lyrics rendered at the very bottom of the video (subtitle position).
+    Uses a semi-transparent black pill background for readability.
+    Font: larger, clean, bold with thick border.
+    """
     if not segments:
         return ""
 
     parts       = []
-    FONT_SIZE   = 34
-    LINE_HEIGHT = 44
-    MAX_CHARS   = 38
+    FONT_SIZE   = 38          # larger, easy to read
+    LINE_HEIGHT = 46
+    MAX_CHARS   = 42
 
     for seg in segments:
         start, end, raw_text = seg["start"], seg["end"], seg["text"]
         dur      = max(end - start, 0.5)
-        fade_dur = min(0.15, dur / 6)
+        fade_dur = min(0.20, dur / 5)
 
         alpha_expr = (
             f"if(between(t,{start},{start+fade_dur}),"
@@ -415,22 +458,27 @@ def build_karaoke_filter(segments, font):
 
         lines = wrap_lyric_line(raw_text, max_chars=MAX_CHARS)
 
-        # ── y position: upper area of video, well above the title block ──
-        # Title block starts at ~63% → lyrics sit at ~40-45% from top
+        # ── BOTTOM position: 84% for 1 line, 81% for 2 lines ──
         if len(lines) == 1:
+            y_pos = f"h*0.855"
             parts.append(
+                # Dark pill background
                 f"drawtext=fontfile={font}:text='{ffmpeg_escape(lines[0])}':"
                 f"fontsize={FONT_SIZE}:fontcolor=white:"
-                f"borderw=3:bordercolor=black@0.95:"
-                f"x=(w-text_w)/2:y=h*0.42:alpha='{alpha_expr}'"
+                f"borderw=4:bordercolor=black@1.0:"
+                f"shadowcolor=black@0.85:shadowx=2:shadowy=2:"
+                f"box=1:boxcolor=black@0.55:boxborderw=14:"
+                f"x=(w-text_w)/2:y={y_pos}:alpha='{alpha_expr}'"
             )
         else:
             for li, line in enumerate(lines):
-                y_pos = f"h*0.40+{li * LINE_HEIGHT}"
+                y_pos = f"h*0.840+{li * LINE_HEIGHT}"
                 parts.append(
                     f"drawtext=fontfile={font}:text='{ffmpeg_escape(line)}':"
                     f"fontsize={FONT_SIZE}:fontcolor=white:"
-                    f"borderw=3:bordercolor=black@0.95:"
+                    f"borderw=4:bordercolor=black@1.0:"
+                    f"shadowcolor=black@0.85:shadowx=2:shadowy=2:"
+                    f"box=1:boxcolor=black@0.55:boxborderw=12:"
                     f"x=(w-text_w)/2:y={y_pos}:alpha='{alpha_expr}'"
                 )
 
@@ -438,23 +486,18 @@ def build_karaoke_filter(segments, font):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TITLE BLOCK — permanently burned into bottom 37% of video
-#
-# Layout (bottom of frame):
-#   ─────────── gold line ───────────    ← y 65.5%
-#   SONG TITLE IN CAPS                   ← y 67-73%
-#   ARTIST NAME (gold)                   ← y 77-80%
+# TITLE BLOCK — song title + artist name in the middle of the dark band
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_title_block(font, song_title, artist_name):
     parts = []
 
-    # Gold separator line
+    # ── Top gold separator line ──
     parts.append(
         f"drawtext=fontfile={font}:text='{'─' * 55}':"
         f"fontsize=8:fontcolor=0xD4AF37@0:"
         f"box=1:boxcolor=0xD4AF37@0.70:boxborderw=0:"
-        f"x=(w-tw)/2:y=h*0.655"
+        f"x=(w-tw)/2:y=h*{TITLE_SEPARATOR}"
     )
 
     title_words = song_title.split()
@@ -464,48 +507,56 @@ def build_title_block(font, song_title, artist_name):
         line2 = ffmpeg_escape(" ".join(title_words[mid:]).upper())
         parts.append(
             f"drawtext=fontfile={font}:text='{line1}':"
-            f"fontsize=48:fontcolor=white@0.97:"
+            f"fontsize=46:fontcolor=white@0.97:"
             f"borderw=3:bordercolor=black@0.80:"
             f"shadowcolor=black@0.60:shadowx=2:shadowy=2:"
-            f"x=(w-text_w)/2:y=h*0.670"
+            f"x=(w-text_w)/2:y=h*{TITLE_Y}"
         )
         parts.append(
             f"drawtext=fontfile={font}:text='{line2}':"
-            f"fontsize=48:fontcolor=white@0.97:"
+            f"fontsize=46:fontcolor=white@0.97:"
             f"borderw=3:bordercolor=black@0.80:"
             f"shadowcolor=black@0.60:shadowx=2:shadowy=2:"
-            f"x=(w-text_w)/2:y=h*0.725"
+            f"x=(w-text_w)/2:y=h*{TITLE_Y + 0.055}"
         )
-        artist_y = "h*0.800"
+        artist_y_val = ARTIST_Y + 0.025
     else:
         parts.append(
             f"drawtext=fontfile={font}:text='{ffmpeg_escape(song_title.upper())}':"
-            f"fontsize=48:fontcolor=white@0.97:"
+            f"fontsize=46:fontcolor=white@0.97:"
             f"borderw=3:bordercolor=black@0.80:"
             f"shadowcolor=black@0.60:shadowx=2:shadowy=2:"
-            f"x=(w-text_w)/2:y=h*0.685"
+            f"x=(w-text_w)/2:y=h*{TITLE_Y}"
         )
-        artist_y = "h*0.775"
+        artist_y_val = ARTIST_Y
 
     parts.append(
         f"drawtext=fontfile={font}:text='{ffmpeg_escape(artist_name.upper())}':"
         f"fontsize=26:fontcolor=0xD4AF37@0.95:"
         f"borderw=2:bordercolor=black@0.70:"
         f"shadowcolor=black@0.50:shadowx=1:shadowy=1:"
-        f"x=(w-text_w)/2:y={artist_y}"
+        f"x=(w-text_w)/2:y=h*{artist_y_val}"
+    )
+
+    # ── Bottom gold separator line (above lyrics) ──
+    parts.append(
+        f"drawtext=fontfile={font}:text='{'─' * 55}':"
+        f"fontsize=8:fontcolor=0xD4AF37@0:"
+        f"box=1:boxcolor=0xD4AF37@0.55:boxborderw=0:"
+        f"x=(w-tw)/2:y=h*{LYRICS_SEP_Y}"
     )
 
     return ",".join(parts)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# EQ BAR — sits just ABOVE the gold separator line at ~62% from top
+# EQ BAR — animated gold bars, positioned ABOVE the title block (≈63%)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_eq_bar(font):
     """
-    Animated gold EQ bars positioned just above the title block.
-    center_y = h*0.630 means the bars are at 63% from top = just above the title.
+    EQ soundbar sits between the image area and the title block.
+    center_y = h*0.635  →  just above the first gold separator line.
     """
     parts     = []
     bar_count = 25
@@ -513,8 +564,7 @@ def build_eq_bar(font):
     max_amp, min_amp = 45, 8
     half      = bar_count // 2
 
-    # ── FIXED: bars sit at 63% from top, just above the gold line at 65.5% ──
-    center_y = "h*0.630"
+    center_y = f"h*{EQ_CENTER_Y}"
 
     freqs  = [1.4, 2.0, 2.6, 1.8, 3.0, 2.3, 1.6, 2.8, 2.1, 3.4, 1.9, 2.7, 2.0,
               2.7, 1.9, 3.4, 2.1, 2.8, 1.6, 2.3, 3.0, 1.8, 2.6, 2.0, 1.4]
@@ -530,14 +580,12 @@ def build_eq_bar(font):
         bar_x     = f"(w/2+({offset})-tw/2)"
         fs_expr   = f"{5}+{amplitude}*abs(sin(t*{freqs[i]}+{phases[i]}))"
 
-        # Upper bar (grows upward from center_y)
         parts.append(
             f"drawtext=fontfile={font}:text='|':"
             f"fontsize={fs_expr}:fontcolor=0xD4AF37@{alpha_up:.2f}:"
             f"x={bar_x}:y=({center_y})-text_h:"
             f"shadowcolor=0xFFE87C@0.35:shadowx=0:shadowy=0"
         )
-        # Lower reflection (grows downward)
         parts.append(
             f"drawtext=fontfile={font}:text='|':"
             f"fontsize={fs_expr}:fontcolor=0xC49A20@{alpha_dwn:.2f}:"
@@ -548,7 +596,7 @@ def build_eq_bar(font):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SOCIAL BADGES — YouTube + TikTok (bottom-right, pulsing)
+# SOCIAL BADGES
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
@@ -667,12 +715,13 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
     fade_filter   = f"fade=t=in:st=0:d=2,fade=t=out:st={fade_out_st:.2f}:d=3"
     format_filter = "format=yuv420p"
 
-    # Dark overlay covering bottom 37% of frame (behind title block)
+    # ── Dark gradient overlay covering bottom ~38% of frame ──
+    # This covers: EQ bar + title block + lyrics area
     dark_overlay = (
         f"drawtext=fontfile={font}:text=' ':"
         f"fontsize=1:fontcolor=black@0:"
-        f"box=1:boxcolor=black@0.65:boxborderw=0:"
-        f"x=0:y=h*0.630:fix_bounds=1"
+        f"box=1:boxcolor=black@0.68:boxborderw=0:"
+        f"x=0:y=h*{DARK_START}:fix_bounds=1"
     )
 
     eq_filter      = build_eq_bar(font)
@@ -683,7 +732,7 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
     social_text_filter = build_social_text_filter(font, badge_info)
     has_icons          = badge_info["has_yt"] or badge_info["has_tt"]
 
-    # Main vf chain (all drawtext layers)
+    # ── Assemble vf chain ──
     vf_parts = [zoom_filter, light_filter, grade_filter,
                 fade_filter, format_filter, dark_overlay, eq_filter]
     if title_filter:
@@ -844,11 +893,12 @@ def generate_video():
                     print(f"[Lyrics] Transcription failed: {e}")
                     lyrics_segments = []
 
+            # Fallback: evenly distribute if Whisper failed
             if not lyrics_segments and lyrics_text:
                 duration = get_audio_duration(audio_path)
                 lines    = split_lyrics_lines(lyrics_text)
                 if lines:
-                    step    = max(duration / len(lines), 1.5)
+                    step    = max(duration / len(lines), 1.8)
                     current = 0.0
                     for line in lines:
                         lyrics_segments.append({
@@ -975,7 +1025,7 @@ def serve_audio_segment(filename):
 
 
 @app.route('/health', methods=['GET'])
-def health()  :
+def health():
     return jsonify({'status': 'ok', 'message': 'Video server running'}), 200
 
 
