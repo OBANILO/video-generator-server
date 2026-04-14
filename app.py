@@ -19,22 +19,19 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 AUDIO_SEGMENTS_FOLDER = '/tmp/audio_segments'
 os.makedirs(AUDIO_SEGMENTS_FOLDER, exist_ok=True)
 
-# Icon assets — prepared once at startup
+# ── Icon assets — in root folder next to app.py ──
 ICON_DIR = '/tmp/social_icons'
 os.makedirs(ICON_DIR, exist_ok=True)
 
-YOUTUBE_ICON_SRC = os.path.join(os.path.dirname(__file__), 'icons', 'youtube.png')
-TIKTOK_ICON_SRC  = os.path.join(os.path.dirname(__file__), 'icons', 'tiktok.png')
+YOUTUBE_ICON_SRC = os.path.join(os.path.dirname(__file__), 'youtube.png')
+TIKTOK_ICON_SRC  = os.path.join(os.path.dirname(__file__), 'tiktok.png')
 
 YOUTUBE_ICON = os.path.join(ICON_DIR, 'youtube.png')
 TIKTOK_ICON  = os.path.join(ICON_DIR, 'tiktok.png')
 
 
 def prepare_icons():
-    """
-    Resize social icons to 52×52 RGBA PNGs at startup.
-    Falls back gracefully if source files are missing.
-    """
+    """Resize social icons to 52×52 RGBA PNGs at startup."""
     pairs = [
         (YOUTUBE_ICON_SRC, YOUTUBE_ICON),
         (TIKTOK_ICON_SRC,  TIKTOK_ICON),
@@ -452,12 +449,11 @@ def build_title_block(font, song_title, artist_name):
         f"x=(w-tw)/2:y=h*0.655"
     )
 
-    # Main title
     title_words = song_title.split()
     if len(song_title) > 32 and len(title_words) >= 3:
-        mid    = len(title_words) // 2
-        line1  = ffmpeg_escape(" ".join(title_words[:mid]).upper())
-        line2  = ffmpeg_escape(" ".join(title_words[mid:]).upper())
+        mid   = len(title_words) // 2
+        line1 = ffmpeg_escape(" ".join(title_words[:mid]).upper())
+        line2 = ffmpeg_escape(" ".join(title_words[mid:]).upper())
         parts.append(
             f"drawtext=fontfile={font}:text='{line1}':"
             f"fontsize=52:fontcolor=white@0.97:"
@@ -483,7 +479,6 @@ def build_title_block(font, song_title, artist_name):
         )
         artist_y = "h*0.770"
 
-    # Artist name
     parts.append(
         f"drawtext=fontfile={font}:text='{ffmpeg_escape(artist_name.upper())}':"
         f"fontsize=28:fontcolor=0xD4AF37@0.95:"
@@ -537,102 +532,44 @@ def build_eq_bar(font):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SOCIAL BADGES — YouTube + TikTok
-#
-# Layout (bottom-right corner, stacked vertically):
-#
-#   [YT icon]  sorlune          ← pulses every ~3 s
-#   [TK icon]  sorlune08        ← pulses offset by 1.5 s
-#
-# Animation: gentle alpha pulse (0.70 → 1.0 → 0.70) draws the eye
-# without being distracting. Each badge slides in slightly from the right
-# using a sine-based x offset on first 2 seconds.
-#
-# Uses PNG overlay (alpha-aware) for the icons +
-# drawtext for the channel names beside them.
+# SOCIAL BADGES — YouTube + TikTok (bottom-right, pulsing animation)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def build_social_badges_filtergraph(font, duration,
-                                    yt_channel="sorlune",
-                                    tt_channel="sorlune08"):
-    """
-    Returns:
-        inputs   : list of extra -i arguments (the two icon PNGs)
-        fg_parts : list of filter_complex segments to append
-        last_pad : the label of the final video stream after all overlays
-    """
+def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
     has_yt = os.path.exists(YOUTUBE_ICON)
     has_tt = os.path.exists(TIKTOK_ICON)
 
-    inputs    = []
-    fg_parts  = []
-
-    # Icon size and positions (relative to 1280×720 canvas)
-    ICON_W  = 36          # display size (downscaled from 52px source)
+    ICON_W  = 36
     ICON_H  = 36
-    PADDING = 18          # from right / bottom edge
-    GAP     = 12          # vertical gap between the two badges
+    PADDING = 18
+    GAP     = 12
 
-    # Badge 1 (YouTube) — bottom-right, one badge height above bottom
-    YT_X = f"W-{ICON_W + PADDING + 110}"    # leave 110px for text
-    YT_Y = f"H-{ICON_H * 2 + GAP + PADDING + 10}"
-
-    # Badge 2 (TikTok) — directly below YouTube badge
-    TT_X = YT_X
-    TT_Y = f"H-{ICON_H + PADDING}"
-
-    # ── Pulse alpha expressions ──
-    # YouTube pulses with period ~3s, TikTok offset by 1.5s
-    def pulse_alpha(period, offset, lo=0.65, hi=1.0):
-        # alpha = lo + (hi-lo) * (0.5 + 0.5*sin(2π/period * t + offset))
+    # Pulse: YouTube and TikTok breathe in opposite phases
+    def pulse(period, offset, lo=0.65, hi=1.0):
         amp = (hi - lo) / 2
         mid = (hi + lo) / 2
         return f"{mid}+{amp}*sin(6.2832/{period}*t+{offset})"
 
-    yt_alpha = pulse_alpha(3.0, 0.0)
-    tt_alpha = pulse_alpha(3.0, 3.14)   # π offset = opposite phase
+    yt_alpha = pulse(3.0, 0.0)
+    tt_alpha = pulse(3.0, 3.14)
 
-    # ── Slide-in: icon eases in from right during first 1.5s ──
-    # x offset starts at +30px and goes to 0
-    def slide_x(base_x, slide_dur=1.5, slide_px=30):
-        return (
-            f"if(lt(t,{slide_dur}),"
-            f"{base_x}+{slide_px}*(1-t/{slide_dur}),"
-            f"{base_x})"
-        )
-
-    yt_icon_x_expr = f"W-{ICON_W + PADDING + 114}"
-    tt_icon_x_expr = yt_icon_x_expr
-
-    # ── Text positions (to the right of icons) ──
-    TEXT_X_OFFSET = ICON_W + 8     # pixels right of icon left edge
+    icon_x   = f"W-{ICON_W + PADDING + 114}"
+    yt_icon_y = f"H-{ICON_H * 2 + GAP + PADDING + 10}"
+    tt_icon_y = f"H-{ICON_H + PADDING}"
 
     yt_text_x = f"W-{PADDING + 108}"
     tt_text_x = yt_text_x
-
     yt_text_y = f"H-{ICON_H * 2 + GAP + PADDING + 3}"
     tt_text_y = f"H-{ICON_H + PADDING - 2}"
 
-    # ══ Build filter_complex segments ══
-
-    # We need to overlay icons using the overlay filter.
-    # drawtext cannot render PNGs; we use overlay for icons and drawtext for labels.
-    #
-    # Chain: [prev_v][icon]overlay=...  (with alpha=1 for PNG transparency)
-    # We accumulate: base → yt_overlay → tt_overlay
-    # Then add drawtext labels for the channel names on top.
-
-    input_index_base = 2   # 0=image, 1=audio → icons start at 2
-
-    icon_inputs  = []
     overlay_segs = []
-    stream_label = "vbase"   # will be set by caller
+    icon_paths   = []
+
+    input_index_base = 2  # 0=image, 1=audio
 
     if has_yt:
-        icon_inputs.append(YOUTUBE_ICON)
-        yt_idx = input_index_base + len(icon_inputs) - 1
-
-        # Scale icon to ICON_W×ICON_H and apply alpha pulse
+        icon_paths.append(YOUTUBE_ICON)
+        yt_idx = input_index_base + len(icon_paths) - 1
         overlay_segs.append(
             f"[{yt_idx}:v]scale={ICON_W}:{ICON_H},"
             f"format=rgba,"
@@ -640,9 +577,8 @@ def build_social_badges_filtergraph(font, duration,
         )
 
     if has_tt:
-        icon_inputs.append(TIKTOK_ICON)
-        tt_idx = input_index_base + len(icon_inputs) - 1
-
+        icon_paths.append(TIKTOK_ICON)
+        tt_idx = input_index_base + len(icon_paths) - 1
         overlay_segs.append(
             f"[{tt_idx}:v]scale={ICON_W}:{ICON_H},"
             f"format=rgba,"
@@ -650,56 +586,45 @@ def build_social_badges_filtergraph(font, duration,
         )
 
     return {
-        "icon_paths":    icon_inputs,
-        "overlay_segs":  overlay_segs,
-        "has_yt":        has_yt,
-        "has_tt":        has_tt,
-        "yt_icon_x":     yt_icon_x_expr,
-        "yt_icon_y":     f"H-{ICON_H * 2 + GAP + PADDING + 10}",
-        "tt_icon_x":     tt_icon_x_expr,
-        "tt_icon_y":     f"H-{ICON_H + PADDING}",
-        "yt_text_x":     yt_text_x,
-        "yt_text_y":     yt_text_y,
-        "tt_text_x":     tt_text_x,
-        "tt_text_y":     tt_text_y,
-        "yt_alpha":      yt_alpha,
-        "tt_alpha":      tt_alpha,
-        "yt_channel":    yt_channel,
-        "tt_channel":    tt_channel,
+        "has_yt":       has_yt,
+        "has_tt":       has_tt,
+        "icon_paths":   icon_paths,
+        "overlay_segs": overlay_segs,
+        "icon_x":       icon_x,
+        "yt_icon_y":    yt_icon_y,
+        "tt_icon_y":    tt_icon_y,
+        "yt_text_x":    yt_text_x,
+        "tt_text_x":    tt_text_x,
+        "yt_text_y":    yt_text_y,
+        "tt_text_y":    tt_text_y,
+        "yt_alpha":     yt_alpha,
+        "tt_alpha":     tt_alpha,
+        "yt_channel":   yt_channel,
+        "tt_channel":   tt_channel,
     }
 
 
-def build_social_text_filter(font, badge_info):
-    """
-    Returns drawtext filters for channel names beside the icons.
-    These go into the main -vf chain (after overlay).
-    """
+def build_social_text_filter(font, info):
     parts = []
-
-    if badge_info["has_yt"]:
-        yt_ch = ffmpeg_escape(badge_info["yt_channel"])
-        # White channel name with pulse alpha
+    if info["has_yt"]:
         parts.append(
-            f"drawtext=fontfile={font}:text='{yt_ch}':"
-            f"fontsize=18:fontcolor=white@{badge_info['yt_alpha']}:"
+            f"drawtext=fontfile={font}:text='{ffmpeg_escape(info['yt_channel'])}':"
+            f"fontsize=18:fontcolor=white@{info['yt_alpha']}:"
             f"borderw=2:bordercolor=black@0.80:"
-            f"x={badge_info['yt_text_x']}:y={badge_info['yt_text_y']}"
+            f"x={info['yt_text_x']}:y={info['yt_text_y']}"
         )
-
-    if badge_info["has_tt"]:
-        tt_ch = ffmpeg_escape(badge_info["tt_channel"])
+    if info["has_tt"]:
         parts.append(
-            f"drawtext=fontfile={font}:text='{tt_ch}':"
-            f"fontsize=18:fontcolor=white@{badge_info['tt_alpha']}:"
+            f"drawtext=fontfile={font}:text='{ffmpeg_escape(info['tt_channel'])}':"
+            f"fontsize=18:fontcolor=white@{info['tt_alpha']}:"
             f"borderw=2:bordercolor=black@0.80:"
-            f"x={badge_info['tt_text_x']}:y={badge_info['tt_text_y']}"
+            f"x={info['tt_text_x']}:y={info['tt_text_y']}"
         )
-
     return ",".join(parts) if parts else ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# VIDEO FILTER CHAIN + FFMPEG COMMAND BUILDER
+# BUILD FFMPEG COMMAND
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_ffmpeg_command(image_path, audio_path, output_path,
@@ -711,7 +636,6 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
     frames      = int(duration * fps)
     fade_out_st = max(duration - 3, duration * 0.85)
 
-    # ── Zoom / Ken Burns ──
     z_inc = 0.08 / max(frames, 1)
     zoom_filter = (
         f"scale=3840:2160:flags=lanczos,"
@@ -743,54 +667,37 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
         f"x=0:y=h*0.630:fix_bounds=1"
     )
 
-    eq_filter = build_eq_bar(font)
+    eq_filter    = build_eq_bar(font)
+    title_filter = build_title_block(font, song_title, artist_name) if song_title else ""
+    karaoke_filter = build_karaoke_filter(lyrics_segments, font) if lyrics_segments else ""
 
-    title_filter = ""
-    if song_title:
-        title_filter = build_title_block(font, song_title, artist_name)
-
-    karaoke_filter = ""
-    if lyrics_segments:
-        karaoke_filter = build_karaoke_filter(lyrics_segments, font)
-
-    # ── Social badge info ──
-    badge_info = build_social_badges_filtergraph(
-        font, duration,
-        yt_channel=yt_channel,
-        tt_channel=tt_channel
-    )
-
+    badge_info         = build_social_badges_info(yt_channel, tt_channel)
     social_text_filter = build_social_text_filter(font, badge_info)
 
-    # ── Decide whether to use filter_complex (icons) or simple -vf ──
     has_icons = badge_info["has_yt"] or badge_info["has_tt"]
 
+    # Build the main vf chain (everything except icon PNG overlays)
+    vf_parts = [zoom_filter, light_filter, grade_filter,
+                fade_filter, format_filter, overlay_filter, eq_filter]
+    if title_filter:
+        vf_parts.append(title_filter)
+    if karaoke_filter:
+        vf_parts.append(karaoke_filter)
+    if social_text_filter:
+        vf_parts.append(social_text_filter)
+
+    vf_chain = ",".join(vf_parts)
+
     if has_icons:
-        # Build the simple -vf chain for everything EXCEPT icon overlays
-        vf_parts = [zoom_filter, light_filter, grade_filter,
-                    fade_filter, format_filter, overlay_filter, eq_filter]
-        if title_filter:
-            vf_parts.append(title_filter)
-        if karaoke_filter:
-            vf_parts.append(karaoke_filter)
-        if social_text_filter:
-            vf_parts.append(social_text_filter)
-
-        vf_chain = ",".join(vf_parts)
-
-        # Icon overlay via filter_complex
-        # [0:v] → vf chain → [vfout] → overlay yt → overlay tt → [final]
-        fc_parts = []
-        fc_parts.extend(badge_info["overlay_segs"])
-
-        # Apply the main vf chain to stream 0
+        # Use filter_complex: apply vf chain, then overlay PNG icons
+        fc_parts = list(badge_info["overlay_segs"])
         fc_parts.append(f"[0:v]{vf_chain}[vfout]")
 
         stream = "vfout"
         if badge_info["has_yt"]:
             fc_parts.append(
                 f"[{stream}][yt_icon]overlay="
-                f"x={badge_info['yt_icon_x']}:y={badge_info['yt_icon_y']}:"
+                f"x={badge_info['icon_x']}:y={badge_info['yt_icon_y']}:"
                 f"format=auto[after_yt]"
             )
             stream = "after_yt"
@@ -798,25 +705,25 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
         if badge_info["has_tt"]:
             fc_parts.append(
                 f"[{stream}][tt_icon]overlay="
-                f"x={badge_info['tt_icon_x']}:y={badge_info['tt_icon_y']}:"
+                f"x={badge_info['icon_x']}:y={badge_info['tt_icon_y']}:"
                 f"format=auto[final]"
             )
             stream = "final"
 
         filter_complex = ";".join(fc_parts)
+        audio_index    = len(badge_info["icon_paths"]) + 1
 
         extra_inputs = []
         for p in badge_info["icon_paths"]:
             extra_inputs += ['-i', p]
 
         cmd = (
-            ['ffmpeg', '-y',
-             '-loop', '1', '-i', image_path]
+            ['ffmpeg', '-y', '-loop', '1', '-i', image_path]
             + extra_inputs
             + ['-i', audio_path,
                '-filter_complex', filter_complex,
                '-map', f'[{stream}]',
-               '-map', f'{len(badge_info["icon_paths"]) + 1}:a',
+               '-map', f'{audio_index}:a',
                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20',
                '-c:a', 'aac', '-b:a', '192k',
                '-pix_fmt', 'yuv420p',
@@ -826,18 +733,11 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
 
     else:
         # No icons — simple -vf
-        vf_parts = [zoom_filter, light_filter, grade_filter,
-                    fade_filter, format_filter, overlay_filter, eq_filter]
-        if title_filter:
-            vf_parts.append(title_filter)
-        if karaoke_filter:
-            vf_parts.append(karaoke_filter)
-
         cmd = [
             'ffmpeg', '-y',
             '-loop', '1', '-i', image_path,
             '-i', audio_path,
-            '-vf', ",".join(vf_parts),
+            '-vf', vf_chain,
             '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20',
             '-c:a', 'aac', '-b:a', '192k',
             '-pix_fmt', 'yuv420p',
@@ -902,8 +802,8 @@ def generate_video():
     openai_key  = data.get('openai_key', '').strip()
     song_title  = data.get('title',  '').strip()
     artist_name = data.get('artist', 'SORLUNE').strip()
-    yt_channel  = data.get('yt_channel',  'sorlune').strip()
-    tt_channel  = data.get('tt_channel',  'sorlune08').strip()
+    yt_channel  = data.get('yt_channel', 'sorlune').strip()
+    tt_channel  = data.get('tt_channel', 'sorlune08').strip()
 
     if not audio_url or not image_url:
         return jsonify({'error': 'Missing audio_url or image_url'}), 400
