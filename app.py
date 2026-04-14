@@ -19,7 +19,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 AUDIO_SEGMENTS_FOLDER = '/tmp/audio_segments'
 os.makedirs(AUDIO_SEGMENTS_FOLDER, exist_ok=True)
 
-# ── Icon assets — in root folder next to app.py ──
+# Icon assets — in root folder next to app.py
 ICON_DIR = '/tmp/social_icons'
 os.makedirs(ICON_DIR, exist_ok=True)
 
@@ -31,7 +31,6 @@ TIKTOK_ICON  = os.path.join(ICON_DIR, 'tiktok.png')
 
 
 def prepare_icons():
-    """Resize social icons to 52×52 RGBA PNGs at startup."""
     pairs = [
         (YOUTUBE_ICON_SRC, YOUTUBE_ICON),
         (TIKTOK_ICON_SRC,  TIKTOK_ICON),
@@ -372,6 +371,8 @@ def ffmpeg_escape(text):
 
 # ══════════════════════════════════════════════════════════════════════════════
 # KARAOKE LYRICS FILTER
+# Lyrics appear in the UPPER half of the video (y=40% from top)
+# so they never overlap with the title block at the bottom
 # ══════════════════════════════════════════════════════════════════════════════
 
 def wrap_lyric_line(text, max_chars=38):
@@ -393,9 +394,9 @@ def build_karaoke_filter(segments, font):
         return ""
 
     parts       = []
-    FONT_SIZE   = 32
-    LINE_HEIGHT = 42
-    MAX_CHARS   = 40
+    FONT_SIZE   = 34
+    LINE_HEIGHT = 44
+    MAX_CHARS   = 38
 
     for seg in segments:
         start, end, raw_text = seg["start"], seg["end"], seg["text"]
@@ -414,20 +415,22 @@ def build_karaoke_filter(segments, font):
 
         lines = wrap_lyric_line(raw_text, max_chars=MAX_CHARS)
 
+        # ── y position: upper area of video, well above the title block ──
+        # Title block starts at ~63% → lyrics sit at ~40-45% from top
         if len(lines) == 1:
             parts.append(
                 f"drawtext=fontfile={font}:text='{ffmpeg_escape(lines[0])}':"
-                f"fontsize={FONT_SIZE}:fontcolor=white@0.95:"
-                f"borderw=2:bordercolor=black@0.90:"
-                f"x=(w-text_w)/2:y=h*0.58:alpha='{alpha_expr}'"
+                f"fontsize={FONT_SIZE}:fontcolor=white:"
+                f"borderw=3:bordercolor=black@0.95:"
+                f"x=(w-text_w)/2:y=h*0.42:alpha='{alpha_expr}'"
             )
         else:
             for li, line in enumerate(lines):
-                y_pos = f"h*0.56+{li * LINE_HEIGHT}"
+                y_pos = f"h*0.40+{li * LINE_HEIGHT}"
                 parts.append(
                     f"drawtext=fontfile={font}:text='{ffmpeg_escape(line)}':"
-                    f"fontsize={FONT_SIZE}:fontcolor=white@0.95:"
-                    f"borderw=2:bordercolor=black@0.90:"
+                    f"fontsize={FONT_SIZE}:fontcolor=white:"
+                    f"borderw=3:bordercolor=black@0.95:"
                     f"x=(w-text_w)/2:y={y_pos}:alpha='{alpha_expr}'"
                 )
 
@@ -435,7 +438,12 @@ def build_karaoke_filter(segments, font):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TITLE BLOCK
+# TITLE BLOCK — permanently burned into bottom 37% of video
+#
+# Layout (bottom of frame):
+#   ─────────── gold line ───────────    ← y 65.5%
+#   SONG TITLE IN CAPS                   ← y 67-73%
+#   ARTIST NAME (gold)                   ← y 77-80%
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_title_block(font, song_title, artist_name):
@@ -456,32 +464,32 @@ def build_title_block(font, song_title, artist_name):
         line2 = ffmpeg_escape(" ".join(title_words[mid:]).upper())
         parts.append(
             f"drawtext=fontfile={font}:text='{line1}':"
-            f"fontsize=52:fontcolor=white@0.97:"
+            f"fontsize=48:fontcolor=white@0.97:"
             f"borderw=3:bordercolor=black@0.80:"
             f"shadowcolor=black@0.60:shadowx=2:shadowy=2:"
             f"x=(w-text_w)/2:y=h*0.670"
         )
         parts.append(
             f"drawtext=fontfile={font}:text='{line2}':"
-            f"fontsize=52:fontcolor=white@0.97:"
+            f"fontsize=48:fontcolor=white@0.97:"
             f"borderw=3:bordercolor=black@0.80:"
             f"shadowcolor=black@0.60:shadowx=2:shadowy=2:"
-            f"x=(w-text_w)/2:y=h*0.730"
+            f"x=(w-text_w)/2:y=h*0.725"
         )
         artist_y = "h*0.800"
     else:
         parts.append(
             f"drawtext=fontfile={font}:text='{ffmpeg_escape(song_title.upper())}':"
-            f"fontsize=52:fontcolor=white@0.97:"
+            f"fontsize=48:fontcolor=white@0.97:"
             f"borderw=3:bordercolor=black@0.80:"
             f"shadowcolor=black@0.60:shadowx=2:shadowy=2:"
-            f"x=(w-text_w)/2:y=h*0.690"
+            f"x=(w-text_w)/2:y=h*0.685"
         )
-        artist_y = "h*0.770"
+        artist_y = "h*0.775"
 
     parts.append(
         f"drawtext=fontfile={font}:text='{ffmpeg_escape(artist_name.upper())}':"
-        f"fontsize=28:fontcolor=0xD4AF37@0.95:"
+        f"fontsize=26:fontcolor=0xD4AF37@0.95:"
         f"borderw=2:bordercolor=black@0.70:"
         f"shadowcolor=black@0.50:shadowx=1:shadowy=1:"
         f"x=(w-text_w)/2:y={artist_y}"
@@ -491,16 +499,22 @@ def build_title_block(font, song_title, artist_name):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# EQ BAR
+# EQ BAR — sits just ABOVE the gold separator line at ~62% from top
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_eq_bar(font):
+    """
+    Animated gold EQ bars positioned just above the title block.
+    center_y = h*0.630 means the bars are at 63% from top = just above the title.
+    """
     parts     = []
     bar_count = 25
     bar_gap   = 16
-    max_amp, min_amp = 48, 10
+    max_amp, min_amp = 45, 8
     half      = bar_count // 2
-    center_y  = "h*0.635"
+
+    # ── FIXED: bars sit at 63% from top, just above the gold line at 65.5% ──
+    center_y = "h*0.630"
 
     freqs  = [1.4, 2.0, 2.6, 1.8, 3.0, 2.3, 1.6, 2.8, 2.1, 3.4, 1.9, 2.7, 2.0,
               2.7, 1.9, 3.4, 2.1, 2.8, 1.6, 2.3, 3.0, 1.8, 2.6, 2.0, 1.4]
@@ -516,12 +530,14 @@ def build_eq_bar(font):
         bar_x     = f"(w/2+({offset})-tw/2)"
         fs_expr   = f"{5}+{amplitude}*abs(sin(t*{freqs[i]}+{phases[i]}))"
 
+        # Upper bar (grows upward from center_y)
         parts.append(
             f"drawtext=fontfile={font}:text='|':"
             f"fontsize={fs_expr}:fontcolor=0xD4AF37@{alpha_up:.2f}:"
             f"x={bar_x}:y=({center_y})-text_h:"
             f"shadowcolor=0xFFE87C@0.35:shadowx=0:shadowy=0"
         )
+        # Lower reflection (grows downward)
         parts.append(
             f"drawtext=fontfile={font}:text='|':"
             f"fontsize={fs_expr}:fontcolor=0xC49A20@{alpha_dwn:.2f}:"
@@ -532,7 +548,7 @@ def build_eq_bar(font):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SOCIAL BADGES — YouTube + TikTok (bottom-right, pulsing animation)
+# SOCIAL BADGES — YouTube + TikTok (bottom-right, pulsing)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
@@ -544,7 +560,6 @@ def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
     PADDING = 18
     GAP     = 12
 
-    # Pulse: YouTube and TikTok breathe in opposite phases
     def pulse(period, offset, lo=0.65, hi=1.0):
         amp = (hi - lo) / 2
         mid = (hi + lo) / 2
@@ -553,7 +568,7 @@ def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
     yt_alpha = pulse(3.0, 0.0)
     tt_alpha = pulse(3.0, 3.14)
 
-    icon_x   = f"W-{ICON_W + PADDING + 114}"
+    icon_x    = f"W-{ICON_W + PADDING + 114}"
     yt_icon_y = f"H-{ICON_H * 2 + GAP + PADDING + 10}"
     tt_icon_y = f"H-{ICON_H + PADDING}"
 
@@ -564,8 +579,7 @@ def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
 
     overlay_segs = []
     icon_paths   = []
-
-    input_index_base = 2  # 0=image, 1=audio
+    input_index_base = 2
 
     if has_yt:
         icon_paths.append(YOUTUBE_ICON)
@@ -586,21 +600,14 @@ def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
         )
 
     return {
-        "has_yt":       has_yt,
-        "has_tt":       has_tt,
-        "icon_paths":   icon_paths,
-        "overlay_segs": overlay_segs,
-        "icon_x":       icon_x,
-        "yt_icon_y":    yt_icon_y,
-        "tt_icon_y":    tt_icon_y,
-        "yt_text_x":    yt_text_x,
-        "tt_text_x":    tt_text_x,
-        "yt_text_y":    yt_text_y,
-        "tt_text_y":    tt_text_y,
-        "yt_alpha":     yt_alpha,
-        "tt_alpha":     tt_alpha,
-        "yt_channel":   yt_channel,
-        "tt_channel":   tt_channel,
+        "has_yt": has_yt, "has_tt": has_tt,
+        "icon_paths": icon_paths, "overlay_segs": overlay_segs,
+        "icon_x": icon_x,
+        "yt_icon_y": yt_icon_y, "tt_icon_y": tt_icon_y,
+        "yt_text_x": yt_text_x, "tt_text_x": tt_text_x,
+        "yt_text_y": yt_text_y, "tt_text_y": tt_text_y,
+        "yt_alpha": yt_alpha, "tt_alpha": tt_alpha,
+        "yt_channel": yt_channel, "tt_channel": tt_channel,
     }
 
 
@@ -660,25 +667,25 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
     fade_filter   = f"fade=t=in:st=0:d=2,fade=t=out:st={fade_out_st:.2f}:d=3"
     format_filter = "format=yuv420p"
 
-    overlay_filter = (
+    # Dark overlay covering bottom 37% of frame (behind title block)
+    dark_overlay = (
         f"drawtext=fontfile={font}:text=' ':"
         f"fontsize=1:fontcolor=black@0:"
-        f"box=1:boxcolor=black@0.62:boxborderw=0:"
+        f"box=1:boxcolor=black@0.65:boxborderw=0:"
         f"x=0:y=h*0.630:fix_bounds=1"
     )
 
-    eq_filter    = build_eq_bar(font)
-    title_filter = build_title_block(font, song_title, artist_name) if song_title else ""
+    eq_filter      = build_eq_bar(font)
+    title_filter   = build_title_block(font, song_title, artist_name) if song_title else ""
     karaoke_filter = build_karaoke_filter(lyrics_segments, font) if lyrics_segments else ""
 
     badge_info         = build_social_badges_info(yt_channel, tt_channel)
     social_text_filter = build_social_text_filter(font, badge_info)
+    has_icons          = badge_info["has_yt"] or badge_info["has_tt"]
 
-    has_icons = badge_info["has_yt"] or badge_info["has_tt"]
-
-    # Build the main vf chain (everything except icon PNG overlays)
+    # Main vf chain (all drawtext layers)
     vf_parts = [zoom_filter, light_filter, grade_filter,
-                fade_filter, format_filter, overlay_filter, eq_filter]
+                fade_filter, format_filter, dark_overlay, eq_filter]
     if title_filter:
         vf_parts.append(title_filter)
     if karaoke_filter:
@@ -689,7 +696,6 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
     vf_chain = ",".join(vf_parts)
 
     if has_icons:
-        # Use filter_complex: apply vf chain, then overlay PNG icons
         fc_parts = list(badge_info["overlay_segs"])
         fc_parts.append(f"[0:v]{vf_chain}[vfout]")
 
@@ -730,9 +736,7 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
                '-t', str(duration), '-shortest',
                output_path]
         )
-
     else:
-        # No icons — simple -vf
         cmd = [
             'ffmpeg', '-y',
             '-loop', '1', '-i', image_path,
@@ -971,7 +975,7 @@ def serve_audio_segment(filename):
 
 
 @app.route('/health', methods=['GET'])
-def health():
+def health()  :
     return jsonify({'status': 'ok', 'message': 'Video server running'}), 200
 
 
