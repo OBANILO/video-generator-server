@@ -30,26 +30,38 @@ TIKTOK_ICON  = os.path.join(ICON_DIR, 'tiktok.png')
 
 
 def prepare_icons():
-    pairs = [
-        (YOUTUBE_ICON_SRC, YOUTUBE_ICON),
-        (TIKTOK_ICON_SRC,  TIKTOK_ICON),
-    ]
+    pairs = [(YOUTUBE_ICON_SRC, YOUTUBE_ICON), (TIKTOK_ICON_SRC, TIKTOK_ICON)]
     for src, dst in pairs:
         if os.path.exists(dst):
             continue
         if not os.path.exists(src):
-            print(f"[Icons] Source not found: {src} — social badges disabled")
+            print(f"[Icons] Source not found: {src}")
             continue
         try:
             img = Image.open(src).convert('RGBA')
             img = img.resize((52, 52), Image.LANCZOS)
             img.save(dst)
-            print(f"[Icons] Prepared {dst}")
         except Exception as e:
-            print(f"[Icons] Failed to prepare {dst}: {e}")
-
+            print(f"[Icons] Failed: {e}")
 
 prepare_icons()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LAYOUT
+# ─────────────────────────────────────────────────────────────────────────────
+#  0%   ┌──────────────────────────┐
+#       │                          │
+#       │   ARTIST  (full frame)   │
+#       │                          │
+#  80%  ├──────────────────────────┤  soft dark gradient
+#  84%  │   lyrics  (clean white)  │  NO box background
+#  93%  │  ▌▋▊▉▊▋▌  EQ soundbar  │  gold bars — very bottom
+# 100%  └──────────────────────────┘
+# ══════════════════════════════════════════════════════════════════════════════
+
+LYRICS_Y    = 0.84
+EQ_CENTER_Y = 0.93
+DARK_START  = 0.78
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -58,13 +70,8 @@ prepare_icons()
 
 def download_file(url, dest_path):
     cache_bust = f"?nocache={int(time.time())}"
-    full_url   = url + cache_bust
-    headers    = {
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-    }
-    r = requests.get(full_url, timeout=120, stream=True, headers=headers)
+    headers = {'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache', 'Expires': '0'}
+    r = requests.get(url + cache_bust, timeout=120, stream=True, headers=headers)
     if r.status_code != 200:
         r = requests.get(url, timeout=120, stream=True, headers=headers)
     r.raise_for_status()
@@ -76,31 +83,25 @@ def download_file(url, dest_path):
 
 def get_audio_duration(audio_path):
     result = subprocess.run([
-        'ffprobe', '-v', 'error',
-        '-show_entries', 'format=duration',
-        '-of', 'default=noprint_wrappers=1:nokey=1',
-        audio_path
+        'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1', audio_path
     ], capture_output=True, text=True)
     return float(result.stdout.strip())
 
 
 def get_best_font():
-    """Try to find a clean, modern sans-serif bold font."""
     candidates = [
         '/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf',
         '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+        '/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf',
         '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
         '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
-        '/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf',
     ]
     for path in candidates:
         if os.path.exists(path):
             print(f"[Font] Using: {path}")
             return path
-    result = subprocess.run(
-        ['fc-match', '-f', '%{file}', 'sans:bold'],
-        capture_output=True, text=True
-    )
+    result = subprocess.run(['fc-match', '-f', '%{file}', 'sans:bold'], capture_output=True, text=True)
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
     return '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
@@ -113,27 +114,22 @@ def get_best_font():
 _SECTION_WORDS = (
     r'verse|chorus|bridge|hook|outro|intro|pre[\-\s]?chorus|post[\-\s]?chorus|'
     r'refrain|interlude|instrumental|spoken|rap|breakdown|solo|'
-    r'violin solo|guitar solo|piano solo|drum solo|'
-    r'ad[\-\s]?lib|vamp|coda|tag|skit|outro|fade'
+    r'ad[\-\s]?lib|vamp|coda|tag|skit|fade'
 )
-
 SECTION_LABEL_PATTERNS = [
-    r'^\[.*\]$',
-    r'^\(.*\)$',
+    r'^\[.*\]$', r'^\(.*\)$',
     rf'^({_SECTION_WORDS})\s*[\d:.\-]*\s*$',
     rf'^({_SECTION_WORDS})\s*[\(\[].*[\)\]][\s:]*$',
     rf'^({_SECTION_WORDS})\s*\d*\s*:$',
     r'^[\d\s\.\)\(\:\-]+$',
 ]
-
 SECTION_REGEX = [re.compile(p, re.IGNORECASE) for p in SECTION_LABEL_PATTERNS]
 
 
 def is_section_label(line):
-    stripped          = line.strip()
-    stripped_no_colon = stripped.rstrip(':').strip()
+    stripped = line.strip()
     for pattern in SECTION_REGEX:
-        if pattern.match(stripped) or pattern.match(stripped_no_colon):
+        if pattern.match(stripped) or pattern.match(stripped.rstrip(':').strip()):
             return True
     return False
 
@@ -144,10 +140,7 @@ def split_lyrics_lines(lyrics_text):
     lines = []
     for line in lyrics_text.replace('\r\n', '\n').replace('\r', '\n').split('\n'):
         clean = line.strip()
-        if not clean:
-            continue
-        if is_section_label(clean):
-            print(f"[Lyrics] Skipping section label: '{clean}'")
+        if not clean or is_section_label(clean):
             continue
         lines.append(clean)
     return lines
@@ -158,7 +151,7 @@ def normalize_word(w):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WHISPER ALIGNMENT  — improved sync
+# WHISPER ALIGNMENT
 # ══════════════════════════════════════════════════════════════════════════════
 
 def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
@@ -179,25 +172,24 @@ def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
                     "model": "whisper-1",
                     "response_format": "verbose_json",
                     "timestamp_granularities[]": "word",
-                    "language": "en"
                 },
                 timeout=300
             )
 
         if response.status_code != 200:
-            print(f"[Whisper] API error: {response.status_code} — {response.text[:300]}")
+            print(f"[Whisper] API error {response.status_code}: {response.text[:300]}")
             return []
 
         data  = response.json()
         words = data.get("words", [])
 
         if words and len(words) > 3:
-            print(f"[Whisper] Got {len(words)} word timestamps — using word alignment")
+            print(f"[Whisper] {len(words)} word timestamps")
             return _align_by_word_timestamps(lyric_lines, words)
 
         segments = data.get("segments", [])
         if segments:
-            print(f"[Whisper] Using {len(segments)} segments (fallback)")
+            print(f"[Whisper] {len(segments)} segments fallback")
             return _align_by_segment_timestamps(lyric_lines, segments)
 
         return []
@@ -208,10 +200,6 @@ def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
 
 
 def _align_by_word_timestamps(lyric_lines, whisper_words):
-    """
-    Improved alignment: sequential scan with small look-ahead window,
-    prevents words from being reused, enforces forward-only movement.
-    """
     wwords = []
     for w in whisper_words:
         txt = w.get("word", "").strip()
@@ -237,27 +225,23 @@ def _align_by_word_timestamps(lyric_lines, whisper_words):
         if not line_words:
             continue
 
-        # All words exhausted — extrapolate timing from last segment
         if word_cursor >= total_words:
             last_end = result[-1]["end"] if result else 0
             result.append({
                 "start": round(last_end + 0.2, 2),
-                "end":   round(last_end + 0.2 + max(line_word_count * 0.35, 1.5), 2),
+                "end":   round(last_end + 0.2 + max(line_word_count * 0.35, 1.8), 2),
                 "text":  line
             })
             continue
 
-        # Look-ahead window: search up to 3× the line word count beyond cursor
-        search_limit = min(word_cursor + max(line_word_count * 4, 20), total_words)
+        search_limit   = min(word_cursor + max(line_word_count * 4, 20), total_words)
         best_score     = -1.0
         best_start_idx = word_cursor
         best_end_idx   = min(word_cursor + line_word_count, total_words)
         lyric_set      = set(line_words)
 
         for start_i in range(word_cursor, search_limit):
-            min_w = max(1, line_word_count - 2)
-            max_w = min(line_word_count + 3, total_words - start_i)
-            for w_len in range(min_w, max_w + 1):
+            for w_len in range(max(1, line_word_count - 2), min(line_word_count + 4, total_words - start_i + 1)):
                 end_i = start_i + w_len
                 if end_i > total_words:
                     break
@@ -270,41 +254,38 @@ def _align_by_word_timestamps(lyric_lines, whisper_words):
                     best_start_idx = start_i
                     best_end_idx   = end_i
 
-        if best_score >= 0.25:
-            seg      = wwords[best_start_idx:best_end_idx]
-            seg_start = seg[0]["start"]
-            seg_end   = seg[-1]["end"]
+        if best_score >= 0.20:
+            seg         = wwords[best_start_idx:best_end_idx]
+            seg_start   = seg[0]["start"]
+            seg_end     = seg[-1]["end"]
             word_cursor = best_end_idx
         else:
-            # Fallback: evenly distribute remaining words across remaining lines
-            rem_lines = len(lyric_lines) - line_idx
-            rem_words = total_words - word_cursor
-            wpl       = max(1, rem_words // rem_lines)
-            end_idx   = min(word_cursor + wpl, total_words)
-            seg       = wwords[word_cursor:end_idx]
+            rem_lines   = len(lyric_lines) - line_idx
+            rem_words   = total_words - word_cursor
+            wpl         = max(1, rem_words // max(rem_lines, 1))
+            end_idx     = min(word_cursor + wpl, total_words)
+            seg         = wwords[word_cursor:end_idx]
             if seg:
                 seg_start = seg[0]["start"]
                 seg_end   = seg[-1]["end"]
             elif result:
                 seg_start = result[-1]["end"] + 0.2
-                seg_end   = seg_start + max(line_word_count * 0.35, 1.5)
+                seg_end   = seg_start + max(line_word_count * 0.35, 1.8)
             else:
                 seg_start = 0.0
-                seg_end   = max(line_word_count * 0.35, 1.5)
+                seg_end   = max(line_word_count * 0.35, 1.8)
             word_cursor = end_idx
 
-        # Ensure minimum display duration per line
-        min_dur = max(1.8, line_word_count * 0.30)
+        min_dur = max(1.8, line_word_count * 0.28)
         if seg_end - seg_start < min_dur:
             seg_end = seg_start + min_dur
 
-        # Never overlap previous segment
         if result and seg_start < result[-1]["end"]:
             seg_start = result[-1]["end"] + 0.05
             seg_end   = max(seg_end, seg_start + min_dur)
 
         result.append({"start": round(seg_start, 2), "end": round(seg_end, 2), "text": line})
-        print(f"[Align] Line {line_idx:02d} [{seg_start:.2f}→{seg_end:.2f}] score={best_score:.2f}: {line[:50]}")
+        print(f"[Align] [{seg_start:.2f}s→{seg_end:.2f}s] score={best_score:.2f} | {line[:50]}")
 
     return result
 
@@ -335,38 +316,27 @@ def _align_by_segment_timestamps(lyric_lines, whisper_segments):
                 best_score, best_idx = s, j
         matches.append((best_score, best_idx))
 
-    avg_score = sum(m[0] for m in matches) / len(matches) if matches else 0.0
+    seg_to_lines = {}
+    for i, (_, seg_idx) in enumerate(matches):
+        seg_to_lines.setdefault(seg_idx, []).append(i)
 
-    if avg_score >= 0.20:
-        seg_to_lines = {}
-        for i, (_, seg_idx) in enumerate(matches):
-            seg_to_lines.setdefault(seg_idx, []).append(i)
+    line_timings = {}
+    for seg_idx, idxs in seg_to_lines.items():
+        seg  = segs[seg_idx]
+        dur  = max(seg["end"] - seg["start"], 0.1)
+        step = dur / len(idxs)
+        for k, li in enumerate(idxs):
+            s = seg["start"] + k * step
+            e = seg["start"] + (k + 1) * step
+            line_timings[li] = (round(s, 2), round(max(e, s + 1.8), 2))
 
-        line_timings = {}
-        for seg_idx, idxs in seg_to_lines.items():
-            seg  = segs[seg_idx]
-            dur  = max(seg["end"] - seg["start"], 0.1)
-            step = dur / len(idxs)
-            for k, li in enumerate(idxs):
-                s = seg["start"] + k * step
-                e = seg["start"] + (k + 1) * step
-                line_timings[li] = (round(s, 2), round(max(e, s + 1.8), 2))
+    last_end = segs[-1]["end"]
+    for i in range(len(lyric_lines)):
+        if i not in line_timings:
+            line_timings[i] = (round(last_end + 0.2, 2), round(last_end + 2.0, 2))
+            last_end += 2.2
 
-        last_end = segs[-1]["end"]
-        for i in range(len(lyric_lines)):
-            if i not in line_timings:
-                line_timings[i] = (round(last_end + 0.2, 2), round(last_end + 2.0, 2))
-                last_end += 2.2
-
-        return [{"start": line_timings[i][0], "end": line_timings[i][1], "text": line}
-                for i, line in enumerate(lyric_lines)]
-
-    total_start = segs[0]["start"]
-    total_dur   = max(segs[-1]["end"] - total_start, 1.0)
-    step        = total_dur / len(lyric_lines)
-    return [{"start": round(total_start + i * step, 2),
-             "end":   round(total_start + (i + 1) * step, 2),
-             "text":  line}
+    return [{"start": line_timings[i][0], "end": line_timings[i][1], "text": line}
             for i, line in enumerate(lyric_lines)]
 
 
@@ -386,37 +356,13 @@ def ffmpeg_escape(text):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LAYOUT CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
-#  0%  ┌──────────────────────────┐
-#      │   artist image / scene  │
-#  62% ├──────────────────────────┤  ← dark overlay starts
-#      │   EQ soundbar            │  63-66%
-#      │   ── gold line ──        │  67%
-#      │   SONG TITLE             │  68-74%
-#      │   artist name (gold)     │  77-80%
-#      │   ── gold line ──        │  82%
-#      │   LYRICS (subtitle bar)  │  83-91%
-# 100% └──────────────────────────┘
+# KARAOKE LYRICS — clean white text, NO background box, sits at 84%
 # ══════════════════════════════════════════════════════════════════════════════
 
-LYRICS_Y_TOP    = 0.83   # lyrics text baseline
-EQ_CENTER_Y     = 0.635  # EQ bar center
-TITLE_SEPARATOR = 0.665  # gold line above title
-TITLE_Y         = 0.675  # song title
-ARTIST_Y        = 0.770  # artist name
-LYRICS_SEP_Y    = 0.820  # gold line above lyrics
-DARK_START      = 0.620  # dark overlay begins
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# KARAOKE LYRICS FILTER  — BOTTOM of video (subtitle style)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def wrap_lyric_line(text, max_chars=42):
+def wrap_lyric_line(text, max_chars=44):
     if len(text) <= max_chars:
         return [text]
-    words      = text.split()
+    words = text.split()
     best_split = len(words) // 2
     best_diff  = float('inf')
     for i in range(1, len(words)):
@@ -429,22 +375,24 @@ def wrap_lyric_line(text, max_chars=42):
 
 def build_karaoke_filter(segments, font):
     """
-    Lyrics rendered at the very bottom of the video (subtitle position).
-    Uses a semi-transparent black pill background for readability.
-    Font: larger, clean, bold with thick border.
+    Clean subtitle lyrics:
+    - NO box / NO background
+    - Large bold white text
+    - 4px black border (outline) for readability
+    - Positioned at 84% from top (above EQ bar at 93%)
     """
     if not segments:
         return ""
 
     parts       = []
-    FONT_SIZE   = 38          # larger, easy to read
-    LINE_HEIGHT = 46
-    MAX_CHARS   = 42
+    FONT_SIZE   = 44
+    LINE_HEIGHT = 54
+    MAX_CHARS   = 44
 
     for seg in segments:
         start, end, raw_text = seg["start"], seg["end"], seg["text"]
         dur      = max(end - start, 0.5)
-        fade_dur = min(0.20, dur / 5)
+        fade_dur = min(0.18, dur / 5)
 
         alpha_expr = (
             f"if(between(t,{start},{start+fade_dur}),"
@@ -458,27 +406,23 @@ def build_karaoke_filter(segments, font):
 
         lines = wrap_lyric_line(raw_text, max_chars=MAX_CHARS)
 
-        # ── BOTTOM position: 84% for 1 line, 81% for 2 lines ──
         if len(lines) == 1:
-            y_pos = f"h*0.855"
             parts.append(
-                # Dark pill background
                 f"drawtext=fontfile={font}:text='{ffmpeg_escape(lines[0])}':"
-                f"fontsize={FONT_SIZE}:fontcolor=white:"
+                f"fontsize={FONT_SIZE}:fontcolor=white@1.0:"
                 f"borderw=4:bordercolor=black@1.0:"
-                f"shadowcolor=black@0.85:shadowx=2:shadowy=2:"
-                f"box=1:boxcolor=black@0.55:boxborderw=14:"
-                f"x=(w-text_w)/2:y={y_pos}:alpha='{alpha_expr}'"
+                f"shadowcolor=black@0.95:shadowx=3:shadowy=3:"
+                f"x=(w-text_w)/2:y=h*{LYRICS_Y}:alpha='{alpha_expr}'"
             )
         else:
+            base_y = LYRICS_Y - 0.045
             for li, line in enumerate(lines):
-                y_pos = f"h*0.840+{li * LINE_HEIGHT}"
+                y_pos = f"h*{base_y}+{li * LINE_HEIGHT}"
                 parts.append(
                     f"drawtext=fontfile={font}:text='{ffmpeg_escape(line)}':"
-                    f"fontsize={FONT_SIZE}:fontcolor=white:"
+                    f"fontsize={FONT_SIZE}:fontcolor=white@1.0:"
                     f"borderw=4:bordercolor=black@1.0:"
-                    f"shadowcolor=black@0.85:shadowx=2:shadowy=2:"
-                    f"box=1:boxcolor=black@0.55:boxborderw=12:"
+                    f"shadowcolor=black@0.95:shadowx=3:shadowy=3:"
                     f"x=(w-text_w)/2:y={y_pos}:alpha='{alpha_expr}'"
                 )
 
@@ -486,109 +430,48 @@ def build_karaoke_filter(segments, font):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TITLE BLOCK — song title + artist name in the middle of the dark band
-# ══════════════════════════════════════════════════════════════════════════════
-
-def build_title_block(font, song_title, artist_name):
-    parts = []
-
-    # ── Top gold separator line ──
-    parts.append(
-        f"drawtext=fontfile={font}:text='{'─' * 55}':"
-        f"fontsize=8:fontcolor=0xD4AF37@0:"
-        f"box=1:boxcolor=0xD4AF37@0.70:boxborderw=0:"
-        f"x=(w-tw)/2:y=h*{TITLE_SEPARATOR}"
-    )
-
-    title_words = song_title.split()
-    if len(song_title) > 32 and len(title_words) >= 3:
-        mid   = len(title_words) // 2
-        line1 = ffmpeg_escape(" ".join(title_words[:mid]).upper())
-        line2 = ffmpeg_escape(" ".join(title_words[mid:]).upper())
-        parts.append(
-            f"drawtext=fontfile={font}:text='{line1}':"
-            f"fontsize=46:fontcolor=white@0.97:"
-            f"borderw=3:bordercolor=black@0.80:"
-            f"shadowcolor=black@0.60:shadowx=2:shadowy=2:"
-            f"x=(w-text_w)/2:y=h*{TITLE_Y}"
-        )
-        parts.append(
-            f"drawtext=fontfile={font}:text='{line2}':"
-            f"fontsize=46:fontcolor=white@0.97:"
-            f"borderw=3:bordercolor=black@0.80:"
-            f"shadowcolor=black@0.60:shadowx=2:shadowy=2:"
-            f"x=(w-text_w)/2:y=h*{TITLE_Y + 0.055}"
-        )
-        artist_y_val = ARTIST_Y + 0.025
-    else:
-        parts.append(
-            f"drawtext=fontfile={font}:text='{ffmpeg_escape(song_title.upper())}':"
-            f"fontsize=46:fontcolor=white@0.97:"
-            f"borderw=3:bordercolor=black@0.80:"
-            f"shadowcolor=black@0.60:shadowx=2:shadowy=2:"
-            f"x=(w-text_w)/2:y=h*{TITLE_Y}"
-        )
-        artist_y_val = ARTIST_Y
-
-    parts.append(
-        f"drawtext=fontfile={font}:text='{ffmpeg_escape(artist_name.upper())}':"
-        f"fontsize=26:fontcolor=0xD4AF37@0.95:"
-        f"borderw=2:bordercolor=black@0.70:"
-        f"shadowcolor=black@0.50:shadowx=1:shadowy=1:"
-        f"x=(w-text_w)/2:y=h*{artist_y_val}"
-    )
-
-    # ── Bottom gold separator line (above lyrics) ──
-    parts.append(
-        f"drawtext=fontfile={font}:text='{'─' * 55}':"
-        f"fontsize=8:fontcolor=0xD4AF37@0:"
-        f"box=1:boxcolor=0xD4AF37@0.55:boxborderw=0:"
-        f"x=(w-tw)/2:y=h*{LYRICS_SEP_Y}"
-    )
-
-    return ",".join(parts)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# EQ BAR — animated gold bars, positioned ABOVE the title block (≈63%)
+# EQ SOUNDBAR — gold animated bars at very BOTTOM (below lyrics)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_eq_bar(font):
     """
-    EQ soundbar sits between the image area and the title block.
-    center_y = h*0.635  →  just above the first gold separator line.
+    30 gold bars at h*0.93 — below the lyrics, at the very bottom strip.
     """
     parts     = []
-    bar_count = 25
-    bar_gap   = 16
-    max_amp, min_amp = 45, 8
+    bar_count = 30
+    bar_gap   = 14
+    max_amp   = 36
+    min_amp   = 5
     half      = bar_count // 2
 
     center_y = f"h*{EQ_CENTER_Y}"
 
-    freqs  = [1.4, 2.0, 2.6, 1.8, 3.0, 2.3, 1.6, 2.8, 2.1, 3.4, 1.9, 2.7, 2.0,
-              2.7, 1.9, 3.4, 2.1, 2.8, 1.6, 2.3, 3.0, 1.8, 2.6, 2.0, 1.4]
-    phases = [0.0, 0.5, 1.1, 1.7, 0.3, 0.9, 1.5, 0.2, 0.8, 1.4, 0.6, 1.2, 0.0,
-              1.2, 0.6, 1.4, 0.8, 0.2, 1.5, 0.9, 0.3, 1.7, 1.1, 0.5, 0.0]
+    freqs  = [1.3, 2.1, 2.7, 1.9, 3.1, 2.4, 1.7, 2.9, 2.2, 3.5,
+              2.0, 2.8, 2.1, 2.8, 2.0, 3.5, 2.2, 2.9, 1.7, 2.4,
+              3.1, 1.9, 2.7, 2.1, 1.3, 1.8, 2.5, 3.0, 1.6, 2.3]
+    phases = [0.0, 0.5, 1.1, 1.7, 0.3, 0.9, 1.5, 0.2, 0.8, 1.4,
+              0.6, 1.2, 0.0, 1.2, 0.6, 1.4, 0.8, 0.2, 1.5, 0.9,
+              0.3, 1.7, 1.1, 0.5, 0.0, 0.7, 1.3, 0.4, 1.0, 1.6]
 
     for i in range(bar_count):
         dist      = abs(i - half) / half
-        amplitude = int(min_amp + (max_amp - min_amp) * math.exp(-2.8 * dist * dist))
-        alpha_up  = 0.85 - 0.30 * dist
-        alpha_dwn = 0.50 - 0.20 * dist
+        amplitude = int(min_amp + (max_amp - min_amp) * math.exp(-2.5 * dist * dist))
+        alpha_up  = 0.90 - 0.25 * dist
+        alpha_dwn = 0.40 - 0.15 * dist
         offset    = (i - half) * bar_gap
         bar_x     = f"(w/2+({offset})-tw/2)"
-        fs_expr   = f"{5}+{amplitude}*abs(sin(t*{freqs[i]}+{phases[i]}))"
+        fs_expr   = f"{4}+{amplitude}*abs(sin(t*{freqs[i]}+{phases[i]}))"
 
+        # Bar grows upward from center_y
         parts.append(
             f"drawtext=fontfile={font}:text='|':"
             f"fontsize={fs_expr}:fontcolor=0xD4AF37@{alpha_up:.2f}:"
-            f"x={bar_x}:y=({center_y})-text_h:"
-            f"shadowcolor=0xFFE87C@0.35:shadowx=0:shadowy=0"
+            f"x={bar_x}:y=({center_y})-text_h"
         )
+        # Downward reflection
         parts.append(
             f"drawtext=fontfile={font}:text='|':"
-            f"fontsize={fs_expr}:fontcolor=0xC49A20@{alpha_dwn:.2f}:"
+            f"fontsize={fs_expr}:fontcolor=0xB8860B@{alpha_dwn:.2f}:"
             f"x={bar_x}:y={center_y}"
         )
 
@@ -602,11 +485,7 @@ def build_eq_bar(font):
 def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
     has_yt = os.path.exists(YOUTUBE_ICON)
     has_tt = os.path.exists(TIKTOK_ICON)
-
-    ICON_W  = 36
-    ICON_H  = 36
-    PADDING = 18
-    GAP     = 12
+    ICON_W, ICON_H, PADDING, GAP = 36, 36, 18, 12
 
     def pulse(period, offset, lo=0.65, hi=1.0):
         amp = (hi - lo) / 2
@@ -619,39 +498,26 @@ def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
     icon_x    = f"W-{ICON_W + PADDING + 114}"
     yt_icon_y = f"H-{ICON_H * 2 + GAP + PADDING + 10}"
     tt_icon_y = f"H-{ICON_H + PADDING}"
-
     yt_text_x = f"W-{PADDING + 108}"
     tt_text_x = yt_text_x
     yt_text_y = f"H-{ICON_H * 2 + GAP + PADDING + 3}"
     tt_text_y = f"H-{ICON_H + PADDING - 2}"
 
-    overlay_segs = []
-    icon_paths   = []
-    input_index_base = 2
-
+    overlay_segs, icon_paths = [], []
+    base = 2
     if has_yt:
         icon_paths.append(YOUTUBE_ICON)
-        yt_idx = input_index_base + len(icon_paths) - 1
-        overlay_segs.append(
-            f"[{yt_idx}:v]scale={ICON_W}:{ICON_H},"
-            f"format=rgba,"
-            f"colorchannelmixer=aa={yt_alpha}[yt_icon]"
-        )
-
+        idx = base + len(icon_paths) - 1
+        overlay_segs.append(f"[{idx}:v]scale={ICON_W}:{ICON_H},format=rgba,colorchannelmixer=aa={yt_alpha}[yt_icon]")
     if has_tt:
         icon_paths.append(TIKTOK_ICON)
-        tt_idx = input_index_base + len(icon_paths) - 1
-        overlay_segs.append(
-            f"[{tt_idx}:v]scale={ICON_W}:{ICON_H},"
-            f"format=rgba,"
-            f"colorchannelmixer=aa={tt_alpha}[tt_icon]"
-        )
+        idx = base + len(icon_paths) - 1
+        overlay_segs.append(f"[{idx}:v]scale={ICON_W}:{ICON_H},format=rgba,colorchannelmixer=aa={tt_alpha}[tt_icon]")
 
     return {
         "has_yt": has_yt, "has_tt": has_tt,
         "icon_paths": icon_paths, "overlay_segs": overlay_segs,
-        "icon_x": icon_x,
-        "yt_icon_y": yt_icon_y, "tt_icon_y": tt_icon_y,
+        "icon_x": icon_x, "yt_icon_y": yt_icon_y, "tt_icon_y": tt_icon_y,
         "yt_text_x": yt_text_x, "tt_text_x": tt_text_x,
         "yt_text_y": yt_text_y, "tt_text_y": tt_text_y,
         "yt_alpha": yt_alpha, "tt_alpha": tt_alpha,
@@ -690,8 +556,8 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
 
     frames      = int(duration * fps)
     fade_out_st = max(duration - 3, duration * 0.85)
+    z_inc       = 0.08 / max(frames, 1)
 
-    z_inc = 0.08 / max(frames, 1)
     zoom_filter = (
         f"scale=3840:2160:flags=lanczos,"
         f"zoompan="
@@ -700,45 +566,38 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
         f"y='ih/2-(ih/zoom/2)':"
         f"d={frames}:s=1280x720:fps={fps}"
     )
-
     light_filter = (
-        f"eq=brightness='0.04*sin(t*2.2+0.3)':"
-        f"contrast='1.05+0.04*sin(t*1.8+1.0)':"
-        f"saturation='1.08+0.10*sin(t*2.5+0.8)'"
+        f"eq=brightness='0.03*sin(t*2.2+0.3)':"
+        f"contrast='1.04+0.03*sin(t*1.8+1.0)':"
+        f"saturation='1.06+0.08*sin(t*2.5+0.8)'"
     )
-
     grade_filter = (
         f"curves=r='0/0 0.5/0.53 1/1':g='0/0 0.5/0.48 1/0.95':b='0/0 0.5/0.43 1/0.86',"
         f"vignette=PI/4.5,noise=alls=3:allf=t"
     )
-
     fade_filter   = f"fade=t=in:st=0:d=2,fade=t=out:st={fade_out_st:.2f}:d=3"
     format_filter = "format=yuv420p"
 
-    # ── Dark gradient overlay covering bottom ~38% of frame ──
-    # This covers: EQ bar + title block + lyrics area
+    # Soft dark band covering bottom 22% (lyrics + EQ zone only)
     dark_overlay = (
         f"drawtext=fontfile={font}:text=' ':"
         f"fontsize=1:fontcolor=black@0:"
-        f"box=1:boxcolor=black@0.68:boxborderw=0:"
+        f"box=1:boxcolor=black@0.52:boxborderw=0:"
         f"x=0:y=h*{DARK_START}:fix_bounds=1"
     )
 
-    eq_filter      = build_eq_bar(font)
-    title_filter   = build_title_block(font, song_title, artist_name) if song_title else ""
     karaoke_filter = build_karaoke_filter(lyrics_segments, font) if lyrics_segments else ""
+    eq_filter      = build_eq_bar(font)
 
     badge_info         = build_social_badges_info(yt_channel, tt_channel)
     social_text_filter = build_social_text_filter(font, badge_info)
     has_icons          = badge_info["has_yt"] or badge_info["has_tt"]
 
-    # ── Assemble vf chain ──
-    vf_parts = [zoom_filter, light_filter, grade_filter,
-                fade_filter, format_filter, dark_overlay, eq_filter]
-    if title_filter:
-        vf_parts.append(title_filter)
+    # Order: zoom → grade → fade → dark band → lyrics → EQ (bottom) → social
+    vf_parts = [zoom_filter, light_filter, grade_filter, fade_filter, format_filter, dark_overlay]
     if karaoke_filter:
         vf_parts.append(karaoke_filter)
+    vf_parts.append(eq_filter)
     if social_text_filter:
         vf_parts.append(social_text_filter)
 
@@ -747,28 +606,17 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
     if has_icons:
         fc_parts = list(badge_info["overlay_segs"])
         fc_parts.append(f"[0:v]{vf_chain}[vfout]")
-
         stream = "vfout"
         if badge_info["has_yt"]:
-            fc_parts.append(
-                f"[{stream}][yt_icon]overlay="
-                f"x={badge_info['icon_x']}:y={badge_info['yt_icon_y']}:"
-                f"format=auto[after_yt]"
-            )
+            fc_parts.append(f"[{stream}][yt_icon]overlay=x={badge_info['icon_x']}:y={badge_info['yt_icon_y']}:format=auto[after_yt]")
             stream = "after_yt"
-
         if badge_info["has_tt"]:
-            fc_parts.append(
-                f"[{stream}][tt_icon]overlay="
-                f"x={badge_info['icon_x']}:y={badge_info['tt_icon_y']}:"
-                f"format=auto[final]"
-            )
+            fc_parts.append(f"[{stream}][tt_icon]overlay=x={badge_info['icon_x']}:y={badge_info['tt_icon_y']}:format=auto[final]")
             stream = "final"
 
         filter_complex = ";".join(fc_parts)
         audio_index    = len(badge_info["icon_paths"]) + 1
-
-        extra_inputs = []
+        extra_inputs   = []
         for p in badge_info["icon_paths"]:
             extra_inputs += ['-i', p]
 
@@ -777,25 +625,18 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
             + extra_inputs
             + ['-i', audio_path,
                '-filter_complex', filter_complex,
-               '-map', f'[{stream}]',
-               '-map', f'{audio_index}:a',
+               '-map', f'[{stream}]', '-map', f'{audio_index}:a',
                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20',
-               '-c:a', 'aac', '-b:a', '192k',
-               '-pix_fmt', 'yuv420p',
-               '-t', str(duration), '-shortest',
-               output_path]
+               '-c:a', 'aac', '-b:a', '192k', '-pix_fmt', 'yuv420p',
+               '-t', str(duration), '-shortest', output_path]
         )
     else:
         cmd = [
-            'ffmpeg', '-y',
-            '-loop', '1', '-i', image_path,
-            '-i', audio_path,
+            'ffmpeg', '-y', '-loop', '1', '-i', image_path, '-i', audio_path,
             '-vf', vf_chain,
             '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20',
-            '-c:a', 'aac', '-b:a', '192k',
-            '-pix_fmt', 'yuv420p',
-            '-t', str(duration), '-shortest',
-            output_path
+            '-c:a', 'aac', '-b:a', '192k', '-pix_fmt', 'yuv420p',
+            '-t', str(duration), '-shortest', output_path
         ]
 
     return cmd
@@ -818,10 +659,8 @@ def generate_video_job(job_id, image_path, audio_path, output_path,
             image_path, audio_path, output_path,
             duration, fps, font,
             lyrics_segments=lyrics_segments,
-            song_title=song_title,
-            artist_name=artist_name,
-            yt_channel=yt_channel,
-            tt_channel=tt_channel
+            song_title=song_title, artist_name=artist_name,
+            yt_channel=yt_channel, tt_channel=tt_channel
         )
 
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
@@ -831,7 +670,8 @@ def generate_video_job(job_id, image_path, audio_path, output_path,
             jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
         else:
             jobs[job_id]['status'] = 'error'
-            jobs[job_id]['error']  = proc.stderr[-2000:]
+            jobs[job_id]['error']  = proc.stderr[-3000:]
+            print(f"[FFmpeg ERROR]\n{proc.stderr[-3000:]}")
 
     except Exception as e:
         jobs[job_id]['status'] = 'error'
@@ -885,15 +725,12 @@ def generate_video():
             if openai_key and lyrics_text:
                 try:
                     jobs[job_id]['status'] = 'transcribing_lyrics'
-                    lyrics_segments = transcribe_lyrics_with_whisper(
-                        audio_path, openai_key, lyrics_text
-                    )
-                    print(f"[Lyrics] Got {len(lyrics_segments)} timed segments")
+                    lyrics_segments = transcribe_lyrics_with_whisper(audio_path, openai_key, lyrics_text)
+                    print(f"[Lyrics] {len(lyrics_segments)} segments aligned")
                 except Exception as e:
                     print(f"[Lyrics] Transcription failed: {e}")
                     lyrics_segments = []
 
-            # Fallback: evenly distribute if Whisper failed
             if not lyrics_segments and lyrics_text:
                 duration = get_audio_duration(audio_path)
                 lines    = split_lyrics_lines(lyrics_text)
@@ -911,10 +748,8 @@ def generate_video():
             generate_video_job(
                 job_id, image_path, audio_path, output_path,
                 lyrics_segments=lyrics_segments,
-                song_title=song_title,
-                artist_name=artist_name,
-                yt_channel=yt_channel,
-                tt_channel=tt_channel
+                song_title=song_title, artist_name=artist_name,
+                yt_channel=yt_channel, tt_channel=tt_channel
             )
 
         except Exception as e:
@@ -928,7 +763,7 @@ def generate_video():
     return jsonify({
         'status':      'started',
         'job_id':      job_id,
-        'lyrics_mode': 'word_timestamp_whisper' if (openai_key and lyrics_text) else 'fallback'
+        'lyrics_mode': 'whisper' if (openai_key and lyrics_text) else 'fallback'
     }), 200
 
 
@@ -937,14 +772,12 @@ def check_status(api_key):
     job = jobs.get(api_key)
     if not job:
         return jsonify({'status': 'not_found'}), 200
-
     response = {'status': job['status']}
     if job['status'] == 'completed':
         base_url = request.host_url.rstrip('/')
         response['video_url'] = base_url + f'/videos/{api_key}/{api_key}.mp4'
     if job.get('error'):
         response['error'] = job['error']
-
     return jsonify(response), 200
 
 
@@ -987,10 +820,8 @@ def process_audio():
         return jsonify({'error': f'Download failed: {str(e)}'}), 500
 
     result = subprocess.run([
-        'ffprobe', '-v', 'error',
-        '-show_entries', 'format=duration',
-        '-of', 'default=noprint_wrappers=1:nokey=1',
-        audio_path
+        'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1', audio_path
     ], capture_output=True, text=True)
 
     try:
@@ -998,12 +829,11 @@ def process_audio():
     except Exception:
         return jsonify({'error': 'Could not read audio duration'}), 500
 
-    segments  = []
-    start     = 0
-    seg_index = 0
+    segments = []
+    start, seg_idx = 0, 0
 
     while start < total_duration:
-        seg_filename = f'{session_id}_seg{seg_index:03d}.mp3'
+        seg_filename = f'{session_id}_seg{seg_idx:03d}.mp3'
         seg_path     = os.path.join(AUDIO_SEGMENTS_FOLDER, seg_filename)
         proc = subprocess.run([
             'ffmpeg', '-y', '-i', audio_path,
@@ -1012,8 +842,8 @@ def process_audio():
         ], capture_output=True, timeout=120)
         if proc.returncode == 0 and os.path.exists(seg_path):
             segments.append(seg_filename)
-        start     += segment_duration
-        seg_index += 1
+        start   += segment_duration
+        seg_idx += 1
 
     os.remove(audio_path)
     return jsonify({'segments': segments}), 200
