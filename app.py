@@ -15,9 +15,9 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 AUDIO_SEGMENTS_FOLDER = '/tmp/audio_segments'
 os.makedirs(AUDIO_SEGMENTS_FOLDER, exist_ok=True)
 
-LYRICS_Y    = 0.80   # moved up — more space above EQ bar
+LYRICS_Y    = 0.80
 EQ_CENTER_Y = 0.93
-DARK_START  = 0.75   # dark band starts higher to cover lyrics area
+DARK_START  = 0.75
 
 def download_file(url, dest_path):
     headers = {'Cache-Control': 'no-cache', 'Pragma': 'no-cache'}
@@ -40,7 +40,6 @@ def get_best_font():
     return '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
 
 def get_lyrics_font():
-    # High-design serif font — cinematic, elegant, premium look
     for path in [
         '/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf',
         '/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf',
@@ -140,13 +139,11 @@ def build_artist_watermark(font_italic, artist_name="SORLUNE"):
     name=ffmpeg_escape(artist_name.upper())
     padding=28
     alpha_expr="0.875+0.125*sin(6.2832/4.0*t)"
-    # Gold italic name top-right
     watermark=(f"drawtext=fontfile={font_italic}:text='{name}':"
                f"fontsize=34:fontcolor=0xD4AF37@1.0:"
                f"borderw=2:bordercolor=black@0.80:"
                f"shadowcolor=black@0.70:shadowx=2:shadowy=2:"
                f"x=w-text_w-{padding}:y={padding}:alpha='{alpha_expr}'")
-    # Gold underline decoration
     underline=(f"drawtext=fontfile={font_italic}:text='\u2014\u2014\u2014\u2014\u2014\u2014\u2014':"
                f"fontsize=14:fontcolor=0xD4AF37@1.0:"
                f"x=w-text_w-{padding}:y={padding+42}:alpha='{alpha_expr}'")
@@ -202,7 +199,17 @@ def build_eq_bar(font):
 
 def build_ffmpeg_command(image_path, audio_path, output_path, duration, fps, font, font_italic, lyrics_font=None, lyrics_segments=None, artist_name="SORLUNE"):
     frames=int(duration*fps); fade_out_st=max(duration-3,duration*0.85); z_inc=0.08/max(frames,1)
-    zoom_filter=(f"scale=3840:2160:flags=lanczos,zoompan=z='min(1.00+{z_inc:.8f}*on,1.08)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s=1280x720:fps={fps}")
+
+    # ── HIGH QUALITY zoom — large canvas prevents blur ──
+    zoom_filter = (
+        f"scale=8000:4500:flags=lanczos,"
+        f"zoompan="
+        f"z='min(1.00+{z_inc*0.6:.8f}*on,1.05)':"
+        f"x='iw/2-(iw/zoom/2)':"
+        f"y='ih/2-(ih/zoom/2)':"
+        f"d={frames}:s=1920x1080:fps={fps}"
+    )
+
     light_filter=(f"eq=brightness='0.03*sin(t*2.2+0.3)':contrast='1.04+0.03*sin(t*1.8+1.0)':saturation='1.06+0.08*sin(t*2.5+0.8)'")
     grade_filter="curves=r='0/0 0.5/0.53 1/1':g='0/0 0.5/0.48 1/0.95':b='0/0 0.5/0.43 1/0.86',vignette=PI/4.5,noise=alls=3:allf=t"
     fade_filter=f"fade=t=in:st=0:d=2,fade=t=out:st={fade_out_st:.2f}:d=3"
@@ -210,11 +217,21 @@ def build_ffmpeg_command(image_path, audio_path, output_path, duration, fps, fon
     artist_filter=build_artist_watermark(font_italic, artist_name)
     karaoke_filter=build_karaoke_filter(lyrics_segments, font, lyrics_font=lyrics_font) if lyrics_segments else ""
     eq_filter=build_eq_bar(font)
-    vf_parts=["format=yuv420p" if p=="format=yuv420p" else p for p in [zoom_filter,light_filter,grade_filter,fade_filter,"format=yuv420p",dark_overlay,artist_filter]]
+    vf_parts=[zoom_filter,light_filter,grade_filter,fade_filter,"format=yuv420p",dark_overlay,artist_filter]
     if karaoke_filter: vf_parts.append(karaoke_filter)
     vf_parts.append(eq_filter)
     vf_chain=",".join(vf_parts)
-    return ['ffmpeg','-y','-loop','1','-i',image_path,'-i',audio_path,'-vf',vf_chain,'-c:v','libx264','-preset','ultrafast','-crf','20','-c:a','aac','-b:a','192k','-pix_fmt','yuv420p','-t',str(duration),'-shortest',output_path]
+
+    # ── HIGH QUALITY encoding — CRF 16, preset fast ──
+    return [
+        'ffmpeg','-y','-loop','1','-i',image_path,'-i',audio_path,
+        '-vf',vf_chain,
+        '-c:v','libx264','-preset','fast','-crf','16',
+        '-c:a','aac','-b:a','192k',
+        '-pix_fmt','yuv420p',
+        '-t',str(duration),'-shortest',
+        output_path
+    ]
 
 def generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segments=None, artist_name="SORLUNE"):
     try:
