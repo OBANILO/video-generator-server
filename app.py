@@ -86,6 +86,9 @@ def get_audio_duration(audio_path):
 
 def get_best_font():
     candidates = [
+        os.path.join(os.path.dirname(__file__), 'Anton-Regular.ttf'),
+        os.path.join(os.path.dirname(__file__), 'BebasNeue-Regular.ttf'),
+        os.path.join(os.path.dirname(__file__), 'Montserrat-ExtraBold.ttf'),
         '/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf',
         '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
         '/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf',
@@ -96,9 +99,11 @@ def get_best_font():
         if os.path.exists(path):
             print(f"[Font] Using: {path}")
             return path
+
     result = subprocess.run(['fc-match', '-f', '%{file}', 'sans:bold'], capture_output=True, text=True)
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
+
     return '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
 
 
@@ -433,9 +438,12 @@ def build_eq_bar(font):
 def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
     has_yt = os.path.exists(YOUTUBE_ICON)
     has_tt = os.path.exists(TIKTOK_ICON)
-    ICON_W, ICON_H, PADDING, GAP = 36, 36, 18, 12
 
-    def pulse(period, offset, lo=0.65, hi=1.0):
+    ICON_W, ICON_H = 42, 42
+    PADDING = 22
+    GAP = 16
+
+    def pulse(period, offset, lo=0.78, hi=1.0):
         amp = (hi - lo) / 2
         mid = (hi + lo) / 2
         return f"{mid}+{amp}*sin(6.2832/{period}*t+{offset})"
@@ -443,52 +451,73 @@ def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
     yt_alpha = pulse(3.0, 0.0)
     tt_alpha = pulse(3.0, 3.14)
 
-    icon_x = f"W-{ICON_W + PADDING + 114}"
-    yt_icon_y = f"H-{ICON_H * 2 + GAP + PADDING + 10}"
-    tt_icon_y = f"H-{ICON_H + PADDING}"
-    yt_text_x = f"W-{PADDING + 108}"
-    tt_text_x = yt_text_x
-    yt_text_y = f"H-{ICON_H * 2 + GAP + PADDING + 3}"
-    tt_text_y = f"H-{ICON_H + PADDING - 2}"
+    icon_x = f"W-{ICON_W + PADDING + 150}"
+    yt_icon_y = f"H-{ICON_H * 2 + GAP + PADDING + 6}"
+    tt_icon_y = f"H-{ICON_H + PADDING - 2}"
 
-    overlay_segs, icon_paths = [], []
+    yt_text_x = f"W-{PADDING + 102}"
+    tt_text_x = yt_text_x
+    yt_text_y = f"H-{ICON_H * 2 + GAP + PADDING + 8}"
+    tt_text_y = f"H-{ICON_H + PADDING + 1}"
+
+    overlay_segs = []
+    icon_paths = []
     base = 2
+
     if has_yt:
         icon_paths.append(YOUTUBE_ICON)
         idx = base + len(icon_paths) - 1
-        overlay_segs.append(f"[{idx}:v]scale={ICON_W}:{ICON_H},format=rgba,colorchannelmixer=aa={yt_alpha}[yt_icon]")
+        overlay_segs.append(
+            f"[{idx}:v]scale={ICON_W}:{ICON_H},format=rgba,colorchannelmixer=aa={yt_alpha}[yt_icon]"
+        )
+
     if has_tt:
         icon_paths.append(TIKTOK_ICON)
         idx = base + len(icon_paths) - 1
-        overlay_segs.append(f"[{idx}:v]scale={ICON_W}:{ICON_H},format=rgba,colorchannelmixer=aa={tt_alpha}[tt_icon]")
+        overlay_segs.append(
+            f"[{idx}:v]scale={ICON_W}:{ICON_H},format=rgba,colorchannelmixer=aa={tt_alpha}[tt_icon]"
+        )
 
     return {
-        "has_yt": has_yt, "has_tt": has_tt,
-        "icon_paths": icon_paths, "overlay_segs": overlay_segs,
-        "icon_x": icon_x, "yt_icon_y": yt_icon_y, "tt_icon_y": tt_icon_y,
-        "yt_text_x": yt_text_x, "tt_text_x": tt_text_x,
-        "yt_text_y": yt_text_y, "tt_text_y": tt_text_y,
-        "yt_alpha": yt_alpha, "tt_alpha": tt_alpha,
-        "yt_channel": yt_channel, "tt_channel": tt_channel,
+        "has_yt": has_yt,
+        "has_tt": has_tt,
+        "icon_paths": icon_paths,
+        "overlay_segs": overlay_segs,
+        "icon_x": icon_x,
+        "yt_icon_y": yt_icon_y,
+        "tt_icon_y": tt_icon_y,
+        "yt_text_x": yt_text_x,
+        "tt_text_x": tt_text_x,
+        "yt_text_y": yt_text_y,
+        "tt_text_y": tt_text_y,
+        "yt_alpha": yt_alpha,
+        "tt_alpha": tt_alpha,
+        "yt_channel": yt_channel,
+        "tt_channel": tt_channel,
     }
 
 
 def build_social_text_filter(font, info):
     parts = []
+
     if info["has_yt"]:
         parts.append(
             f"drawtext=fontfile={font}:text='{ffmpeg_escape(info['yt_channel'])}':"
-            f"fontsize=18:fontcolor=white@{info['yt_alpha']}:"
-            f"borderw=2:bordercolor=black@0.80:"
+            f"fontsize=24:fontcolor=white@{info['yt_alpha']}:"
+            f"borderw=3:bordercolor=black@0.95:"
+            f"shadowcolor=0xFFD700@0.90:shadowx=0:shadowy=0:"
             f"x={info['yt_text_x']}:y={info['yt_text_y']}"
         )
+
     if info["has_tt"]:
         parts.append(
             f"drawtext=fontfile={font}:text='{ffmpeg_escape(info['tt_channel'])}':"
-            f"fontsize=18:fontcolor=white@{info['tt_alpha']}:"
-            f"borderw=2:bordercolor=black@0.80:"
+            f"fontsize=24:fontcolor=white@{info['tt_alpha']}:"
+            f"borderw=3:bordercolor=black@0.95:"
+            f"shadowcolor=0x00F2EA@0.85:shadowx=0:shadowy=0:"
             f"x={info['tt_text_x']}:y={info['tt_text_y']}"
         )
+
     return ",".join(parts) if parts else ""
 
 
