@@ -23,34 +23,26 @@ ICON_DIR = '/tmp/social_icons'
 os.makedirs(ICON_DIR, exist_ok=True)
 
 YOUTUBE_ICON_SRC = os.path.join(os.path.dirname(__file__), 'youtube.png')
-TIKTOK_ICON_SRC = os.path.join(os.path.dirname(__file__), 'tiktok.png')
+TIKTOK_ICON_SRC  = os.path.join(os.path.dirname(__file__), 'tiktok.png')
 
 YOUTUBE_ICON = os.path.join(ICON_DIR, 'youtube.png')
-TIKTOK_ICON = os.path.join(ICON_DIR, 'tiktok.png')
+TIKTOK_ICON  = os.path.join(ICON_DIR, 'tiktok.png')
 
 
 def prepare_icons():
     pairs = [(YOUTUBE_ICON_SRC, YOUTUBE_ICON), (TIKTOK_ICON_SRC, TIKTOK_ICON)]
-
     for src, dst in pairs:
-        try:
-            if os.path.exists(dst):
-                os.remove(dst)
-        except Exception:
-            pass
-
+        if os.path.exists(dst):
+            continue
         if not os.path.exists(src):
             print(f"[Icons] Source not found: {src}")
             continue
-
         try:
             img = Image.open(src).convert('RGBA')
-            img = img.resize((36, 36), Image.LANCZOS)
+            img = img.resize((52, 52), Image.LANCZOS)
             img.save(dst)
-            print(f"[Icons] Prepared: {dst}")
         except Exception as e:
             print(f"[Icons] Failed: {e}")
-
 
 prepare_icons()
 
@@ -58,9 +50,9 @@ prepare_icons()
 # LAYOUT
 # ══════════════════════════════════════════════════════════════════════════════
 
-LYRICS_Y = 0.84
+LYRICS_Y    = 0.84
 EQ_CENTER_Y = 0.93
-DARK_START = 0.78
+DARK_START  = 0.78
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -74,17 +66,13 @@ def download_file(url, dest_path):
         'Pragma': 'no-cache',
         'Expires': '0'
     }
-
     r = requests.get(url + cache_bust, timeout=120, stream=True, headers=headers)
     if r.status_code != 200:
         r = requests.get(url, timeout=120, stream=True, headers=headers)
-
     r.raise_for_status()
-
     with open(dest_path, 'wb') as f:
         for chunk in r.iter_content(chunk_size=8192):
             f.write(chunk)
-
     return dest_path
 
 
@@ -93,41 +81,29 @@ def get_audio_duration(audio_path):
         'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
         '-of', 'default=noprint_wrappers=1:nokey=1', audio_path
     ], capture_output=True, text=True)
-
     return float(result.stdout.strip())
 
 
 def get_best_font():
     candidates = [
-        os.path.join(os.path.dirname(__file__), 'Anton-Regular.ttf'),
-        os.path.join(os.path.dirname(__file__), 'BebasNeue-Regular.ttf'),
-        os.path.join(os.path.dirname(__file__), 'Montserrat-ExtraBold.ttf'),
         '/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf',
         '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
         '/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf',
         '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
         '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
     ]
-
     for path in candidates:
         if os.path.exists(path):
             print(f"[Font] Using: {path}")
             return path
-
-    result = subprocess.run(
-        ['fc-match', '-f', '%{file}', 'sans:bold'],
-        capture_output=True,
-        text=True
-    )
-
+    result = subprocess.run(['fc-match', '-f', '%{file}', 'sans:bold'], capture_output=True, text=True)
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
-
     return '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# OPTIONAL LYRICS CLEANING
+# OPTIONAL LYRICS CLEANING (ONLY USED AS LAST FALLBACK)
 # ══════════════════════════════════════════════════════════════════════════════
 
 _SECTION_WORDS = (
@@ -135,16 +111,13 @@ _SECTION_WORDS = (
     r'refrain|interlude|instrumental|spoken|rap|breakdown|solo|'
     r'ad[\-\s]?lib|vamp|coda|tag|skit|fade'
 )
-
 SECTION_LABEL_PATTERNS = [
-    r'^\[.*\]$',
-    r'^\(.*\)$',
+    r'^\[.*\]$', r'^\(.*\)$',
     rf'^({_SECTION_WORDS})\s*[\d:.\-]*\s*$',
     rf'^({_SECTION_WORDS})\s*[\(\[].*[\)\]][\s:]*$',
     rf'^({_SECTION_WORDS})\s*\d*\s*:$',
     r'^[\d\s\.\)\(\:\-]+$',
 ]
-
 SECTION_REGEX = [re.compile(p, re.IGNORECASE) for p in SECTION_LABEL_PATTERNS]
 
 
@@ -159,14 +132,12 @@ def is_section_label(line):
 def split_lyrics_lines(lyrics_text):
     if not lyrics_text:
         return []
-
     lines = []
     for line in lyrics_text.replace('\r\n', '\n').replace('\r', '\n').split('\n'):
         clean = line.strip()
         if not clean or is_section_label(clean):
             continue
         lines.append(clean)
-
     return lines
 
 
@@ -175,7 +146,7 @@ def normalize_word(w):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WHISPER TRANSCRIPTION
+# WHISPER TRANSCRIPTION — STRONG SYNC FROM REAL AUDIO
 # ══════════════════════════════════════════════════════════════════════════════
 
 def transcribe_audio_words_with_whisper(audio_path, openai_api_key):
@@ -231,12 +202,10 @@ def transcribe_audio_words_with_whisper(audio_path, openai_api_key):
 
         segments = data.get("segments", [])
         seg_words = []
-
         for seg in segments:
             text = (seg.get("text") or "").strip()
             start = seg.get("start")
             end = seg.get("end")
-
             if not text or start is None or end is None:
                 continue
 
@@ -248,7 +217,7 @@ def transcribe_audio_words_with_whisper(audio_path, openai_api_key):
             })
 
         if seg_words:
-            print(f"[Whisper] Using {len(seg_words)} segment blocks")
+            print(f"[Whisper] word timestamps missing, using {len(seg_words)} segment blocks")
 
         return seg_words
 
@@ -353,19 +322,14 @@ def ffmpeg_escape(text):
 def wrap_lyric_line(text, max_chars=44):
     if len(text) <= max_chars:
         return [text]
-
     words = text.split()
     best_split = len(words) // 2
     best_diff = float('inf')
-
     for i in range(1, len(words)):
-        p1 = " ".join(words[:i])
-        p2 = " ".join(words[i:])
+        p1, p2 = " ".join(words[:i]), " ".join(words[i:])
         diff = abs(len(p1) - len(p2))
         if diff < best_diff and len(p1) <= max_chars and len(p2) <= max_chars:
-            best_diff = diff
-            best_split = i
-
+            best_diff, best_split = diff, i
     return [" ".join(words[:best_split]), " ".join(words[best_split:])]
 
 
@@ -397,7 +361,7 @@ def build_karaoke_filter(segments, font):
 
         if len(lines) == 1:
             parts.append(
-                f"drawtext=fontfile='{font}':text='{ffmpeg_escape(lines[0])}':"
+                f"drawtext=fontfile={font}:text='{ffmpeg_escape(lines[0])}':"
                 f"fontsize={FONT_SIZE}:fontcolor=white@1.0:"
                 f"borderw=4:bordercolor=black@1.0:"
                 f"shadowcolor=black@0.95:shadowx=3:shadowy=3:"
@@ -408,7 +372,7 @@ def build_karaoke_filter(segments, font):
             for li, line in enumerate(lines):
                 y_pos = f"h*{base_y}+{li * LINE_HEIGHT}"
                 parts.append(
-                    f"drawtext=fontfile='{font}':text='{ffmpeg_escape(line)}':"
+                    f"drawtext=fontfile={font}:text='{ffmpeg_escape(line)}':"
                     f"fontsize={FONT_SIZE}:fontcolor=white@1.0:"
                     f"borderw=4:bordercolor=black@1.0:"
                     f"shadowcolor=black@0.95:shadowx=3:shadowy=3:"
@@ -449,13 +413,12 @@ def build_eq_bar(font):
         fs_expr = f"{4}+{amplitude}*abs(sin(t*{freqs[i]}+{phases[i]}))"
 
         parts.append(
-            f"drawtext=fontfile='{font}':text='|':"
+            f"drawtext=fontfile={font}:text='|':"
             f"fontsize={fs_expr}:fontcolor=0xD4AF37@{alpha_up:.2f}:"
             f"x={bar_x}:y=({center_y})-text_h"
         )
-
         parts.append(
-            f"drawtext=fontfile='{font}':text='|':"
+            f"drawtext=fontfile={font}:text='|':"
             f"fontsize={fs_expr}:fontcolor=0xB8860B@{alpha_dwn:.2f}:"
             f"x={bar_x}:y={center_y}"
         )
@@ -464,78 +427,68 @@ def build_eq_bar(font):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SOCIAL BADGES — SAFE VERSION
+# SOCIAL BADGES
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
     has_yt = os.path.exists(YOUTUBE_ICON)
     has_tt = os.path.exists(TIKTOK_ICON)
+    ICON_W, ICON_H, PADDING, GAP = 36, 36, 18, 12
 
-    ICON_W, ICON_H = 36, 36
-    PADDING = 18
-    GAP = 12
+    def pulse(period, offset, lo=0.65, hi=1.0):
+        amp = (hi - lo) / 2
+        mid = (hi + lo) / 2
+        return f"{mid}+{amp}*sin(6.2832/{period}*t+{offset})"
 
-    icon_x = f"W-{ICON_W + PADDING + 120}"
-    yt_icon_y = f"H-{ICON_H * 2 + GAP + PADDING}"
+    yt_alpha = pulse(3.0, 0.0)
+    tt_alpha = pulse(3.0, 3.14)
+
+    icon_x = f"W-{ICON_W + PADDING + 114}"
+    yt_icon_y = f"H-{ICON_H * 2 + GAP + PADDING + 10}"
     tt_icon_y = f"H-{ICON_H + PADDING}"
-
-    yt_text_x = f"W-{PADDING + 92}"
+    yt_text_x = f"W-{PADDING + 108}"
     tt_text_x = yt_text_x
-    yt_text_y = f"H-{ICON_H * 2 + GAP + PADDING + 4}"
-    tt_text_y = f"H-{ICON_H + PADDING + 4}"
+    yt_text_y = f"H-{ICON_H * 2 + GAP + PADDING + 3}"
+    tt_text_y = f"H-{ICON_H + PADDING - 2}"
 
-    overlay_segs = []
-    icon_paths = []
+    overlay_segs, icon_paths = [], []
     base = 2
-
     if has_yt:
         icon_paths.append(YOUTUBE_ICON)
         idx = base + len(icon_paths) - 1
-        overlay_segs.append(f"[{idx}:v]scale={ICON_W}:{ICON_H},format=rgba[yt_icon]")
-
+        overlay_segs.append(f"[{idx}:v]scale={ICON_W}:{ICON_H},format=rgba,colorchannelmixer=aa={yt_alpha}[yt_icon]")
     if has_tt:
         icon_paths.append(TIKTOK_ICON)
         idx = base + len(icon_paths) - 1
-        overlay_segs.append(f"[{idx}:v]scale={ICON_W}:{ICON_H},format=rgba[tt_icon]")
+        overlay_segs.append(f"[{idx}:v]scale={ICON_W}:{ICON_H},format=rgba,colorchannelmixer=aa={tt_alpha}[tt_icon]")
 
     return {
-        "has_yt": has_yt,
-        "has_tt": has_tt,
-        "icon_paths": icon_paths,
-        "overlay_segs": overlay_segs,
-        "icon_x": icon_x,
-        "yt_icon_y": yt_icon_y,
-        "tt_icon_y": tt_icon_y,
-        "yt_text_x": yt_text_x,
-        "tt_text_x": tt_text_x,
-        "yt_text_y": yt_text_y,
-        "tt_text_y": tt_text_y,
-        "yt_channel": yt_channel,
-        "tt_channel": tt_channel,
+        "has_yt": has_yt, "has_tt": has_tt,
+        "icon_paths": icon_paths, "overlay_segs": overlay_segs,
+        "icon_x": icon_x, "yt_icon_y": yt_icon_y, "tt_icon_y": tt_icon_y,
+        "yt_text_x": yt_text_x, "tt_text_x": tt_text_x,
+        "yt_text_y": yt_text_y, "tt_text_y": tt_text_y,
+        "yt_alpha": yt_alpha, "tt_alpha": tt_alpha,
+        "yt_channel": yt_channel, "tt_channel": tt_channel,
     }
 
 
 def build_social_text_filter(font, info):
     parts = []
-
     if info["has_yt"]:
         parts.append(
-            f"drawtext=fontfile='{font}':text='{ffmpeg_escape(info['yt_channel'])}':"
-            f"fontsize=24:fontcolor=white:"
-            f"borderw=3:bordercolor=black@0.95:"
-            f"x={info['yt_text_x']}:y={info['yt_text_y']}:"
-            f"enable='between(t,0,99999)'"
+            f"drawtext=fontfile={font}:text='{ffmpeg_escape(info['yt_channel'])}':"
+            f"fontsize=18:fontcolor=white@{info['yt_alpha']}:"
+            f"borderw=2:bordercolor=black@0.80:"
+            f"x={info['yt_text_x']}:y={info['yt_text_y']}"
         )
-
     if info["has_tt"]:
         parts.append(
-            f"drawtext=fontfile='{font}':text='{ffmpeg_escape(info['tt_channel'])}':"
-            f"fontsize=24:fontcolor=white:"
-            f"borderw=3:bordercolor=black@0.95:"
-            f"x={info['tt_text_x']}:y={info['tt_text_y']}:"
-            f"enable='between(t,0,99999)'"
+            f"drawtext=fontfile={font}:text='{ffmpeg_escape(info['tt_channel'])}':"
+            f"fontsize=18:fontcolor=white@{info['tt_alpha']}:"
+            f"borderw=2:bordercolor=black@0.80:"
+            f"x={info['tt_text_x']}:y={info['tt_text_y']}"
         )
-
     return ",".join(parts) if parts else ""
 
 
@@ -561,23 +514,20 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
         f"y='ih/2-(ih/zoom/2)':"
         f"d={frames}:s=1280x720:fps={fps}"
     )
-
     light_filter = (
         f"eq=brightness='0.03*sin(t*2.2+0.3)':"
         f"contrast='1.04+0.03*sin(t*1.8+1.0)':"
         f"saturation='1.06+0.08*sin(t*2.5+0.8)'"
     )
-
     grade_filter = (
         f"curves=r='0/0 0.5/0.53 1/1':g='0/0 0.5/0.48 1/0.95':b='0/0 0.5/0.43 1/0.86',"
         f"vignette=PI/4.5,noise=alls=3:allf=t"
     )
-
     fade_filter = f"fade=t=in:st=0:d=2,fade=t=out:st={fade_out_st:.2f}:d=3"
     format_filter = "format=yuv420p"
 
     dark_overlay = (
-        f"drawtext=fontfile='{font}':text=' ':"
+        f"drawtext=fontfile={font}:text=' ':"
         f"fontsize=1:fontcolor=black@0:"
         f"box=1:boxcolor=black@0.52:boxborderw=0:"
         f"x=0:y=h*{DARK_START}:fix_bounds=1"
@@ -591,12 +541,9 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
     has_icons = badge_info["has_yt"] or badge_info["has_tt"]
 
     vf_parts = [zoom_filter, light_filter, grade_filter, fade_filter, format_filter, dark_overlay]
-
     if karaoke_filter:
         vf_parts.append(karaoke_filter)
-
     vf_parts.append(eq_filter)
-
     if social_text_filter:
         vf_parts.append(social_text_filter)
 
@@ -622,7 +569,6 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
         filter_complex = ";".join(fc_parts)
         audio_index = len(badge_info["icon_paths"]) + 1
         extra_inputs = []
-
         for p in badge_info["icon_paths"]:
             extra_inputs += ['-i', p]
 
@@ -631,33 +577,18 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
             + extra_inputs
             + ['-i', audio_path,
                '-filter_complex', filter_complex,
-               '-map', f'[{stream}]',
-               '-map', f'{audio_index}:a',
-               '-c:v', 'libx264',
-               '-preset', 'ultrafast',
-               '-crf', '20',
-               '-c:a', 'aac',
-               '-b:a', '192k',
-               '-pix_fmt', 'yuv420p',
-               '-t', str(duration),
-               '-shortest',
-               output_path]
+               '-map', f'[{stream}]', '-map', f'{audio_index}:a',
+               '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20',
+               '-c:a', 'aac', '-b:a', '192k', '-pix_fmt', 'yuv420p',
+               '-t', str(duration), '-shortest', output_path]
         )
     else:
         cmd = [
-            'ffmpeg', '-y',
-            '-loop', '1', '-i', image_path,
-            '-i', audio_path,
+            'ffmpeg', '-y', '-loop', '1', '-i', image_path, '-i', audio_path,
             '-vf', vf_chain,
-            '-c:v', 'libx264',
-            '-preset', 'ultrafast',
-            '-crf', '20',
-            '-c:a', 'aac',
-            '-b:a', '192k',
-            '-pix_fmt', 'yuv420p',
-            '-t', str(duration),
-            '-shortest',
-            output_path
+            '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20',
+            '-c:a', 'aac', '-b:a', '192k', '-pix_fmt', 'yuv420p',
+            '-t', str(duration), '-shortest', output_path
         ]
 
     return cmd
@@ -680,13 +611,9 @@ def generate_video_job(job_id, image_path, audio_path, output_path,
             image_path, audio_path, output_path,
             duration, fps, font,
             lyrics_segments=lyrics_segments,
-            song_title=song_title,
-            artist_name=artist_name,
-            yt_channel=yt_channel,
-            tt_channel=tt_channel
+            song_title=song_title, artist_name=artist_name,
+            yt_channel=yt_channel, tt_channel=tt_channel
         )
-
-        print("[FFmpeg CMD]", " ".join(cmd))
 
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
 
@@ -701,7 +628,6 @@ def generate_video_job(job_id, image_path, audio_path, output_path,
     except Exception as e:
         jobs[job_id]['status'] = 'error'
         jobs[job_id]['error'] = str(e)
-        print(f"[Generate Video Error] {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -775,16 +701,13 @@ def generate_video():
             generate_video_job(
                 job_id, image_path, audio_path, output_path,
                 lyrics_segments=lyrics_segments,
-                song_title=song_title,
-                artist_name=artist_name,
-                yt_channel=yt_channel,
-                tt_channel=tt_channel
+                song_title=song_title, artist_name=artist_name,
+                yt_channel=yt_channel, tt_channel=tt_channel
             )
 
         except Exception as e:
             jobs[job_id]['status'] = 'error'
             jobs[job_id]['error'] = str(e)
-            print(f"[Run Error] {e}")
 
     thread = threading.Thread(target=run)
     thread.daemon = True
@@ -804,11 +727,9 @@ def check_status(api_key):
         return jsonify({'status': 'not_found'}), 200
 
     response = {'status': job['status']}
-
     if job['status'] == 'completed':
         base_url = request.host_url.rstrip('/')
         response['video_url'] = base_url + f'/videos/{api_key}/{api_key}.mp4'
-
     if job.get('error'):
         response['error'] = job['error']
 
@@ -868,8 +789,7 @@ def process_audio():
         return jsonify({'error': 'Could not read audio duration'}), 500
 
     segments = []
-    start = 0
-    seg_idx = 0
+    start, seg_idx = 0, 0
 
     while start < total_duration:
         seg_filename = f'{session_id}_seg{seg_idx:03d}.mp3'
@@ -877,11 +797,8 @@ def process_audio():
 
         proc = subprocess.run([
             'ffmpeg', '-y', '-i', audio_path,
-            '-ss', str(start),
-            '-t', str(segment_duration),
-            '-c:a', 'libmp3lame',
-            '-b:a', '192k',
-            seg_path
+            '-ss', str(start), '-t', str(segment_duration),
+            '-c:a', 'libmp3lame', '-b:a', '192k', seg_path
         ], capture_output=True, timeout=120)
 
         if proc.returncode == 0 and os.path.exists(seg_path):
