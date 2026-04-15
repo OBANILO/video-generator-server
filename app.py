@@ -48,15 +48,6 @@ prepare_icons()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LAYOUT
-# ─────────────────────────────────────────────────────────────────────────────
-#  0%   ┌──────────────────────────┐
-#       │                          │
-#       │   ARTIST  (full frame)   │
-#       │                          │
-#  80%  ├──────────────────────────┤  soft dark gradient
-#  84%  │   lyrics  (clean white)  │  NO box background
-#  93%  │  ▌▋▊▉▊▋▌  EQ soundbar  │  gold bars — very bottom
-# 100%  └──────────────────────────┘
 # ══════════════════════════════════════════════════════════════════════════════
 
 LYRICS_Y    = 0.84
@@ -70,7 +61,11 @@ DARK_START  = 0.78
 
 def download_file(url, dest_path):
     cache_bust = f"?nocache={int(time.time())}"
-    headers = {'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache', 'Expires': '0'}
+    headers = {
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+    }
     r = requests.get(url + cache_bust, timeout=120, stream=True, headers=headers)
     if r.status_code != 200:
         r = requests.get(url, timeout=120, stream=True, headers=headers)
@@ -108,7 +103,7 @@ def get_best_font():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LYRICS CLEANING
+# OPTIONAL LYRICS CLEANING (ONLY USED AS LAST FALLBACK)
 # ══════════════════════════════════════════════════════════════════════════════
 
 _SECTION_WORDS = (
@@ -147,19 +142,15 @@ def split_lyrics_lines(lyrics_text):
 
 
 def normalize_word(w):
-    return re.sub(r"[^\w]", "", w.lower())
+    return re.sub(r"[^\w']", "", (w or "").lower()).strip()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WHISPER ALIGNMENT
+# WHISPER TRANSCRIPTION — STRONG SYNC FROM REAL AUDIO
 # ══════════════════════════════════════════════════════════════════════════════
 
-def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
+def transcribe_audio_words_with_whisper(audio_path, openai_api_key):
     if not openai_api_key or not os.path.exists(audio_path):
-        return []
-
-    lyric_lines = split_lyrics_lines(lyrics_text)
-    if not lyric_lines:
         return []
 
     try:
@@ -177,167 +168,136 @@ def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
             )
 
         if response.status_code != 200:
-            print(f"[Whisper] API error {response.status_code}: {response.text[:300]}")
+            print(f"[Whisper] API error {response.status_code}: {response.text[:500]}")
             return []
 
-        data  = response.json()
-        words = data.get("words", [])
+        data = response.json()
+        raw_words = data.get("words", [])
+        cleaned_words = []
 
-        if words and len(words) > 3:
-            print(f"[Whisper] {len(words)} word timestamps")
-            return _align_by_word_timestamps(lyric_lines, words)
+        for w in raw_words:
+            word_text = (w.get("word") or "").strip()
+            start = w.get("start")
+            end = w.get("end")
+
+            if not word_text or start is None or end is None:
+                continue
+
+            start = float(start)
+            end = float(end)
+
+            if end <= start:
+                continue
+
+            cleaned_words.append({
+                "word": word_text,
+                "norm": normalize_word(word_text),
+                "start": start,
+                "end": end,
+            })
+
+        if cleaned_words:
+            print(f"[Whisper] {len(cleaned_words)} word timestamps")
+            return cleaned_words
 
         segments = data.get("segments", [])
-        if segments:
-            print(f"[Whisper] {len(segments)} segments fallback")
-            return _align_by_segment_timestamps(lyric_lines, segments)
+        seg_words = []
+        for seg in segments:
+            text = (seg.get("text") or "").strip()
+            start = seg.get("start")
+            end = seg.get("end")
+            if not text or start is None or end is None:
+                continue
 
-        return []
+            seg_words.append({
+                "word": text,
+                "norm": normalize_word(text),
+                "start": float(start),
+                "end": float(end),
+            })
+
+        if seg_words:
+            print(f"[Whisper] word timestamps missing, using {len(seg_words)} segment blocks")
+
+        return seg_words
 
     except Exception as e:
         print(f"[Whisper] Error: {e}")
         return []
 
 
-def _align_by_word_timestamps(lyric_lines, whisper_words):
-    wwords = []
-    for w in whisper_words:
-        txt = w.get("word", "").strip()
-        if not txt:
+def build_lines_from_transcribed_words(words, max_gap=0.45, max_words=5, max_duration=2.8):
+    if not words:
+        return []
+
+    lines = []
+    current = [words[0]]
+
+    def flush_line(line_words):
+        if not line_words:
+            return None
+        text = " ".join(w["word"] for w in line_words).strip()
+        if not text:
+            return None
+        return {
+            "start": round(line_words[0]["start"], 2),
+            "end": round(line_words[-1]["end"], 2),
+            "text": text
+        }
+
+    for w in words[1:]:
+        prev = current[-1]
+        gap = w["start"] - prev["end"]
+        line_duration = w["end"] - current[0]["start"]
+
+        should_break = (
+            gap > max_gap or
+            len(current) >= max_words or
+            line_duration > max_duration
+        )
+
+        if should_break:
+            item = flush_line(current)
+            if item:
+                lines.append(item)
+            current = [w]
+        else:
+            current.append(w)
+
+    item = flush_line(current)
+    if item:
+        lines.append(item)
+
+    cleaned = []
+    for seg in lines:
+        start = float(seg["start"])
+        end = float(seg["end"])
+        text = seg["text"].strip()
+
+        if not text:
             continue
-        wwords.append({
-            "norm":  normalize_word(txt),
-            "start": float(w.get("start", 0)),
-            "end":   float(w.get("end",   0)),
+
+        min_dur = max(0.60, min(1.40, len(text.split()) * 0.22))
+        if end - start < min_dur:
+            end = start + min_dur
+
+        if cleaned and start < cleaned[-1]["end"]:
+            start = round(cleaned[-1]["end"] + 0.03, 2)
+            end = max(end, start + min_dur)
+
+        cleaned.append({
+            "start": round(start, 2),
+            "end": round(end, 2),
+            "text": text
         })
 
-    if not wwords:
-        return []
-
-    result      = []
-    word_cursor = 0
-    total_words = len(wwords)
-
-    for line_idx, line in enumerate(lyric_lines):
-        line_words      = [normalize_word(w) for w in line.split() if normalize_word(w)]
-        line_word_count = len(line_words)
-
-        if not line_words:
-            continue
-
-        if word_cursor >= total_words:
-            last_end = result[-1]["end"] if result else 0
-            result.append({
-                "start": round(last_end + 0.2, 2),
-                "end":   round(last_end + 0.2 + max(line_word_count * 0.35, 1.8), 2),
-                "text":  line
-            })
-            continue
-
-        search_limit   = min(word_cursor + max(line_word_count * 4, 20), total_words)
-        best_score     = -1.0
-        best_start_idx = word_cursor
-        best_end_idx   = min(word_cursor + line_word_count, total_words)
-        lyric_set      = set(line_words)
-
-        for start_i in range(word_cursor, search_limit):
-            for w_len in range(max(1, line_word_count - 2), min(line_word_count + 4, total_words - start_i + 1)):
-                end_i = start_i + w_len
-                if end_i > total_words:
-                    break
-                slice_norms = set(ww["norm"] for ww in wwords[start_i:end_i] if ww["norm"])
-                if not slice_norms:
-                    continue
-                score = len(lyric_set & slice_norms) / max(len(lyric_set), len(slice_norms))
-                if score > best_score:
-                    best_score     = score
-                    best_start_idx = start_i
-                    best_end_idx   = end_i
-
-        if best_score >= 0.20:
-            seg         = wwords[best_start_idx:best_end_idx]
-            seg_start   = seg[0]["start"]
-            seg_end     = seg[-1]["end"]
-            word_cursor = best_end_idx
-        else:
-            rem_lines   = len(lyric_lines) - line_idx
-            rem_words   = total_words - word_cursor
-            wpl         = max(1, rem_words // max(rem_lines, 1))
-            end_idx     = min(word_cursor + wpl, total_words)
-            seg         = wwords[word_cursor:end_idx]
-            if seg:
-                seg_start = seg[0]["start"]
-                seg_end   = seg[-1]["end"]
-            elif result:
-                seg_start = result[-1]["end"] + 0.2
-                seg_end   = seg_start + max(line_word_count * 0.35, 1.8)
-            else:
-                seg_start = 0.0
-                seg_end   = max(line_word_count * 0.35, 1.8)
-            word_cursor = end_idx
-
-        min_dur = max(1.8, line_word_count * 0.28)
-        if seg_end - seg_start < min_dur:
-            seg_end = seg_start + min_dur
-
-        if result and seg_start < result[-1]["end"]:
-            seg_start = result[-1]["end"] + 0.05
-            seg_end   = max(seg_end, seg_start + min_dur)
-
-        result.append({"start": round(seg_start, 2), "end": round(seg_end, 2), "text": line})
-        print(f"[Align] [{seg_start:.2f}s→{seg_end:.2f}s] score={best_score:.2f} | {line[:50]}")
-
-    return result
+    print(f"[Lyrics] Built {len(cleaned)} subtitle lines from transcribed words")
+    return cleaned
 
 
-def _score_line_vs_segment(lyric_line, seg_text):
-    lw = set(normalize_word(w) for w in lyric_line.split() if normalize_word(w))
-    sw = set(normalize_word(w) for w in seg_text.split()   if normalize_word(w))
-    if not lw or not sw:
-        return 0.0
-    return len(lw & sw) / max(len(lw), len(sw))
-
-
-def _align_by_segment_timestamps(lyric_lines, whisper_segments):
-    segs = [
-        {"start": float(s.get("start", 0)), "end": float(s.get("end", 0)),
-         "text": s.get("text", "").strip().lower()}
-        for s in whisper_segments if float(s.get("end", 0)) > float(s.get("start", 0))
-    ]
-    if not segs:
-        return []
-
-    matches = []
-    for line in lyric_lines:
-        best_score, best_idx = -1.0, 0
-        for j, seg in enumerate(segs):
-            s = _score_line_vs_segment(line, seg["text"])
-            if s > best_score:
-                best_score, best_idx = s, j
-        matches.append((best_score, best_idx))
-
-    seg_to_lines = {}
-    for i, (_, seg_idx) in enumerate(matches):
-        seg_to_lines.setdefault(seg_idx, []).append(i)
-
-    line_timings = {}
-    for seg_idx, idxs in seg_to_lines.items():
-        seg  = segs[seg_idx]
-        dur  = max(seg["end"] - seg["start"], 0.1)
-        step = dur / len(idxs)
-        for k, li in enumerate(idxs):
-            s = seg["start"] + k * step
-            e = seg["start"] + (k + 1) * step
-            line_timings[li] = (round(s, 2), round(max(e, s + 1.8), 2))
-
-    last_end = segs[-1]["end"]
-    for i in range(len(lyric_lines)):
-        if i not in line_timings:
-            line_timings[i] = (round(last_end + 0.2, 2), round(last_end + 2.0, 2))
-            last_end += 2.2
-
-    return [{"start": line_timings[i][0], "end": line_timings[i][1], "text": line}
-            for i, line in enumerate(lyric_lines)]
+def transcribe_lyrics_with_whisper(audio_path, openai_api_key, lyrics_text=""):
+    words = transcribe_audio_words_with_whisper(audio_path, openai_api_key)
+    return build_lines_from_transcribed_words(words)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -356,7 +316,7 @@ def ffmpeg_escape(text):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# KARAOKE LYRICS — clean white text, NO background box, sits at 84%
+# KARAOKE LYRICS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def wrap_lyric_line(text, max_chars=44):
@@ -364,34 +324,27 @@ def wrap_lyric_line(text, max_chars=44):
         return [text]
     words = text.split()
     best_split = len(words) // 2
-    best_diff  = float('inf')
+    best_diff = float('inf')
     for i in range(1, len(words)):
         p1, p2 = " ".join(words[:i]), " ".join(words[i:])
-        diff   = abs(len(p1) - len(p2))
+        diff = abs(len(p1) - len(p2))
         if diff < best_diff and len(p1) <= max_chars and len(p2) <= max_chars:
             best_diff, best_split = diff, i
     return [" ".join(words[:best_split]), " ".join(words[best_split:])]
 
 
 def build_karaoke_filter(segments, font):
-    """
-    Clean subtitle lyrics:
-    - NO box / NO background
-    - Large bold white text
-    - 4px black border (outline) for readability
-    - Positioned at 84% from top (above EQ bar at 93%)
-    """
     if not segments:
         return ""
 
-    parts       = []
-    FONT_SIZE   = 44
+    parts = []
+    FONT_SIZE = 44
     LINE_HEIGHT = 54
-    MAX_CHARS   = 44
+    MAX_CHARS = 44
 
     for seg in segments:
         start, end, raw_text = seg["start"], seg["end"], seg["text"]
-        dur      = max(end - start, 0.5)
+        dur = max(end - start, 0.5)
         fade_dur = min(0.18, dur / 5)
 
         alpha_expr = (
@@ -430,45 +383,40 @@ def build_karaoke_filter(segments, font):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# EQ SOUNDBAR — gold animated bars at very BOTTOM (below lyrics)
+# EQ SOUNDBAR
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_eq_bar(font):
-    """
-    30 gold bars at h*0.93 — below the lyrics, at the very bottom strip.
-    """
-    parts     = []
+    parts = []
     bar_count = 30
-    bar_gap   = 14
-    max_amp   = 36
-    min_amp   = 5
-    half      = bar_count // 2
+    bar_gap = 14
+    max_amp = 36
+    min_amp = 5
+    half = bar_count // 2
 
     center_y = f"h*{EQ_CENTER_Y}"
 
-    freqs  = [1.3, 2.1, 2.7, 1.9, 3.1, 2.4, 1.7, 2.9, 2.2, 3.5,
-              2.0, 2.8, 2.1, 2.8, 2.0, 3.5, 2.2, 2.9, 1.7, 2.4,
-              3.1, 1.9, 2.7, 2.1, 1.3, 1.8, 2.5, 3.0, 1.6, 2.3]
+    freqs = [1.3, 2.1, 2.7, 1.9, 3.1, 2.4, 1.7, 2.9, 2.2, 3.5,
+             2.0, 2.8, 2.1, 2.8, 2.0, 3.5, 2.2, 2.9, 1.7, 2.4,
+             3.1, 1.9, 2.7, 2.1, 1.3, 1.8, 2.5, 3.0, 1.6, 2.3]
     phases = [0.0, 0.5, 1.1, 1.7, 0.3, 0.9, 1.5, 0.2, 0.8, 1.4,
               0.6, 1.2, 0.0, 1.2, 0.6, 1.4, 0.8, 0.2, 1.5, 0.9,
               0.3, 1.7, 1.1, 0.5, 0.0, 0.7, 1.3, 0.4, 1.0, 1.6]
 
     for i in range(bar_count):
-        dist      = abs(i - half) / half
+        dist = abs(i - half) / half
         amplitude = int(min_amp + (max_amp - min_amp) * math.exp(-2.5 * dist * dist))
-        alpha_up  = 0.90 - 0.25 * dist
+        alpha_up = 0.90 - 0.25 * dist
         alpha_dwn = 0.40 - 0.15 * dist
-        offset    = (i - half) * bar_gap
-        bar_x     = f"(w/2+({offset})-tw/2)"
-        fs_expr   = f"{4}+{amplitude}*abs(sin(t*{freqs[i]}+{phases[i]}))"
+        offset = (i - half) * bar_gap
+        bar_x = f"(w/2+({offset})-tw/2)"
+        fs_expr = f"{4}+{amplitude}*abs(sin(t*{freqs[i]}+{phases[i]}))"
 
-        # Bar grows upward from center_y
         parts.append(
             f"drawtext=fontfile={font}:text='|':"
             f"fontsize={fs_expr}:fontcolor=0xD4AF37@{alpha_up:.2f}:"
             f"x={bar_x}:y=({center_y})-text_h"
         )
-        # Downward reflection
         parts.append(
             f"drawtext=fontfile={font}:text='|':"
             f"fontsize={fs_expr}:fontcolor=0xB8860B@{alpha_dwn:.2f}:"
@@ -495,7 +443,7 @@ def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
     yt_alpha = pulse(3.0, 0.0)
     tt_alpha = pulse(3.0, 3.14)
 
-    icon_x    = f"W-{ICON_W + PADDING + 114}"
+    icon_x = f"W-{ICON_W + PADDING + 114}"
     yt_icon_y = f"H-{ICON_H * 2 + GAP + PADDING + 10}"
     tt_icon_y = f"H-{ICON_H + PADDING}"
     yt_text_x = f"W-{PADDING + 108}"
@@ -554,9 +502,9 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
                          song_title="", artist_name="SORLUNE",
                          yt_channel="sorlune", tt_channel="sorlune08"):
 
-    frames      = int(duration * fps)
+    frames = int(duration * fps)
     fade_out_st = max(duration - 3, duration * 0.85)
-    z_inc       = 0.08 / max(frames, 1)
+    z_inc = 0.08 / max(frames, 1)
 
     zoom_filter = (
         f"scale=3840:2160:flags=lanczos,"
@@ -575,10 +523,9 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
         f"curves=r='0/0 0.5/0.53 1/1':g='0/0 0.5/0.48 1/0.95':b='0/0 0.5/0.43 1/0.86',"
         f"vignette=PI/4.5,noise=alls=3:allf=t"
     )
-    fade_filter   = f"fade=t=in:st=0:d=2,fade=t=out:st={fade_out_st:.2f}:d=3"
+    fade_filter = f"fade=t=in:st=0:d=2,fade=t=out:st={fade_out_st:.2f}:d=3"
     format_filter = "format=yuv420p"
 
-    # Soft dark band covering bottom 22% (lyrics + EQ zone only)
     dark_overlay = (
         f"drawtext=fontfile={font}:text=' ':"
         f"fontsize=1:fontcolor=black@0:"
@@ -587,13 +534,12 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
     )
 
     karaoke_filter = build_karaoke_filter(lyrics_segments, font) if lyrics_segments else ""
-    eq_filter      = build_eq_bar(font)
+    eq_filter = build_eq_bar(font)
 
-    badge_info         = build_social_badges_info(yt_channel, tt_channel)
+    badge_info = build_social_badges_info(yt_channel, tt_channel)
     social_text_filter = build_social_text_filter(font, badge_info)
-    has_icons          = badge_info["has_yt"] or badge_info["has_tt"]
+    has_icons = badge_info["has_yt"] or badge_info["has_tt"]
 
-    # Order: zoom → grade → fade → dark band → lyrics → EQ (bottom) → social
     vf_parts = [zoom_filter, light_filter, grade_filter, fade_filter, format_filter, dark_overlay]
     if karaoke_filter:
         vf_parts.append(karaoke_filter)
@@ -607,16 +553,22 @@ def build_ffmpeg_command(image_path, audio_path, output_path,
         fc_parts = list(badge_info["overlay_segs"])
         fc_parts.append(f"[0:v]{vf_chain}[vfout]")
         stream = "vfout"
+
         if badge_info["has_yt"]:
-            fc_parts.append(f"[{stream}][yt_icon]overlay=x={badge_info['icon_x']}:y={badge_info['yt_icon_y']}:format=auto[after_yt]")
+            fc_parts.append(
+                f"[{stream}][yt_icon]overlay=x={badge_info['icon_x']}:y={badge_info['yt_icon_y']}:format=auto[after_yt]"
+            )
             stream = "after_yt"
+
         if badge_info["has_tt"]:
-            fc_parts.append(f"[{stream}][tt_icon]overlay=x={badge_info['icon_x']}:y={badge_info['tt_icon_y']}:format=auto[final]")
+            fc_parts.append(
+                f"[{stream}][tt_icon]overlay=x={badge_info['icon_x']}:y={badge_info['tt_icon_y']}:format=auto[final]"
+            )
             stream = "final"
 
         filter_complex = ";".join(fc_parts)
-        audio_index    = len(badge_info["icon_paths"]) + 1
-        extra_inputs   = []
+        audio_index = len(badge_info["icon_paths"]) + 1
+        extra_inputs = []
         for p in badge_info["icon_paths"]:
             extra_inputs += ['-i', p]
 
@@ -652,8 +604,8 @@ def generate_video_job(job_id, image_path, audio_path, output_path,
     try:
         jobs[job_id]['status'] = 'processing'
         duration = get_audio_duration(audio_path)
-        fps      = 25
-        font     = get_best_font()
+        fps = 25
+        font = get_best_font()
 
         cmd = build_ffmpeg_command(
             image_path, audio_path, output_path,
@@ -666,16 +618,16 @@ def generate_video_job(job_id, image_path, audio_path, output_path,
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
 
         if proc.returncode == 0 and os.path.exists(output_path):
-            jobs[job_id]['status']    = 'completed'
+            jobs[job_id]['status'] = 'completed'
             jobs[job_id]['video_url'] = f"/videos/{job_id}/{job_id}.mp4"
         else:
             jobs[job_id]['status'] = 'error'
-            jobs[job_id]['error']  = proc.stderr[-3000:]
+            jobs[job_id]['error'] = proc.stderr[-3000:]
             print(f"[FFmpeg ERROR]\n{proc.stderr[-3000:]}")
 
     except Exception as e:
         jobs[job_id]['status'] = 'error'
-        jobs[job_id]['error']  = str(e)
+        jobs[job_id]['error'] = str(e)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -688,25 +640,25 @@ def generate_video():
     if not data:
         return jsonify({'error': 'No JSON data'}), 400
 
-    audio_url   = data.get('audio_url')
-    image_url   = data.get('image_url')
-    api_key     = data.get('api_key', 'default')
+    audio_url = data.get('audio_url')
+    image_url = data.get('image_url')
+    api_key = data.get('api_key', 'default')
     lyrics_text = data.get('lyrics', '').strip()
-    openai_key  = data.get('openai_key', '').strip()
-    song_title  = data.get('title',  '').strip()
+    openai_key = data.get('openai_key', '').strip()
+    song_title = data.get('title', '').strip()
     artist_name = data.get('artist', 'SORLUNE').strip()
-    yt_channel  = data.get('yt_channel', 'sorlune').strip()
-    tt_channel  = data.get('tt_channel', 'sorlune08').strip()
+    yt_channel = data.get('yt_channel', 'sorlune').strip()
+    tt_channel = data.get('tt_channel', 'sorlune08').strip()
 
     if not audio_url or not image_url:
         return jsonify({'error': 'Missing audio_url or image_url'}), 400
 
-    job_id     = api_key
+    job_id = api_key
     job_folder = os.path.join(UPLOAD_FOLDER, job_id)
     os.makedirs(job_folder, exist_ok=True)
 
-    image_path  = os.path.join(job_folder, 'image.jpg')
-    audio_path  = os.path.join(job_folder, 'audio.mp3')
+    image_path = os.path.join(job_folder, 'image.jpg')
+    audio_path = os.path.join(job_folder, 'audio.mp3')
     output_path = os.path.join(job_folder, f'{job_id}.mp4')
 
     jobs[job_id] = {'status': 'pending', 'video_url': None}
@@ -722,26 +674,27 @@ def generate_video():
             download_file(audio_url, audio_path)
 
             lyrics_segments = []
-            if openai_key and lyrics_text:
+
+            if openai_key:
                 try:
                     jobs[job_id]['status'] = 'transcribing_lyrics'
                     lyrics_segments = transcribe_lyrics_with_whisper(audio_path, openai_key, lyrics_text)
-                    print(f"[Lyrics] {len(lyrics_segments)} segments aligned")
+                    print(f"[Lyrics] {len(lyrics_segments)} subtitle segments built from real audio")
                 except Exception as e:
                     print(f"[Lyrics] Transcription failed: {e}")
                     lyrics_segments = []
 
             if not lyrics_segments and lyrics_text:
                 duration = get_audio_duration(audio_path)
-                lines    = split_lyrics_lines(lyrics_text)
+                lines = split_lyrics_lines(lyrics_text)
                 if lines:
-                    step    = max(duration / len(lines), 1.8)
+                    step = max(duration / len(lines), 1.8)
                     current = 0.0
                     for line in lines:
                         lyrics_segments.append({
                             "start": round(current, 2),
-                            "end":   round(min(current + step, duration), 2),
-                            "text":  line
+                            "end": round(min(current + step, duration), 2),
+                            "text": line
                         })
                         current += step
 
@@ -754,16 +707,16 @@ def generate_video():
 
         except Exception as e:
             jobs[job_id]['status'] = 'error'
-            jobs[job_id]['error']  = str(e)
+            jobs[job_id]['error'] = str(e)
 
     thread = threading.Thread(target=run)
     thread.daemon = True
     thread.start()
 
     return jsonify({
-        'status':      'started',
-        'job_id':      job_id,
-        'lyrics_mode': 'whisper' if (openai_key and lyrics_text) else 'fallback'
+        'status': 'started',
+        'job_id': job_id,
+        'lyrics_mode': 'whisper' if openai_key else 'fallback'
     }), 200
 
 
@@ -772,12 +725,14 @@ def check_status(api_key):
     job = jobs.get(api_key)
     if not job:
         return jsonify({'status': 'not_found'}), 200
+
     response = {'status': job['status']}
     if job['status'] == 'completed':
         base_url = request.host_url.rstrip('/')
         response['video_url'] = base_url + f'/videos/{api_key}/{api_key}.mp4'
     if job.get('error'):
         response['error'] = job['error']
+
     return jsonify(response), 200
 
 
@@ -788,15 +743,18 @@ def serve_video(job_id, filename):
 
 @app.route('/clear-cache', methods=['POST'])
 def clear_cache():
-    data    = request.get_json()
+    data = request.get_json()
     api_key = data.get('api_key') if data else None
+
     if api_key and api_key in jobs:
         del jobs[api_key]
+
     if api_key:
         import shutil
         job_folder = os.path.join(UPLOAD_FOLDER, api_key)
         if os.path.exists(job_folder):
             shutil.rmtree(job_folder, ignore_errors=True)
+
     return jsonify({'status': 'cleared'}), 200
 
 
@@ -806,8 +764,9 @@ def process_audio():
     if not data:
         return jsonify({'error': 'No JSON data'}), 400
 
-    audio_url        = data.get('url')
+    audio_url = data.get('url')
     segment_duration = int(data.get('segment_duration', 60))
+
     if not audio_url:
         return jsonify({'error': 'Missing url'}), 400
 
@@ -834,15 +793,18 @@ def process_audio():
 
     while start < total_duration:
         seg_filename = f'{session_id}_seg{seg_idx:03d}.mp3'
-        seg_path     = os.path.join(AUDIO_SEGMENTS_FOLDER, seg_filename)
+        seg_path = os.path.join(AUDIO_SEGMENTS_FOLDER, seg_filename)
+
         proc = subprocess.run([
             'ffmpeg', '-y', '-i', audio_path,
             '-ss', str(start), '-t', str(segment_duration),
             '-c:a', 'libmp3lame', '-b:a', '192k', seg_path
         ], capture_output=True, timeout=120)
+
         if proc.returncode == 0 and os.path.exists(seg_path):
             segments.append(seg_filename)
-        start   += segment_duration
+
+        start += segment_duration
         seg_idx += 1
 
     os.remove(audio_path)
