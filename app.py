@@ -200,11 +200,11 @@ def build_eq_bar(font):
 def build_ffmpeg_command(image_path, audio_path, output_path, duration, fps, font, font_italic, lyrics_font=None, lyrics_segments=None, artist_name="SORLUNE"):
     frames=int(duration*fps); fade_out_st=max(duration-3,duration*0.85); z_inc=0.08/max(frames,1)
 
-    # ── HIGH QUALITY zoom — large canvas prevents blur ──
+    # ── SHARP zoom — 2x canvas is enough, won't OOM ──
     zoom_filter = (
-        f"scale=8000:4500:flags=lanczos,"
+        f"scale=3840:2160:flags=lanczos,"
         f"zoompan="
-        f"z='min(1.00+{z_inc*0.6:.8f}*on,1.05)':"
+        f"z='min(1.00+{z_inc*0.5:.8f}*on,1.04)':"
         f"x='iw/2-(iw/zoom/2)':"
         f"y='ih/2-(ih/zoom/2)':"
         f"d={frames}:s=1920x1080:fps={fps}"
