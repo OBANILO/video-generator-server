@@ -33,14 +33,20 @@ def prepare_icons():
     pairs = [(YOUTUBE_ICON_SRC, YOUTUBE_ICON), (TIKTOK_ICON_SRC, TIKTOK_ICON)]
     for src, dst in pairs:
         if os.path.exists(dst):
-            continue
+            try:
+                os.remove(dst)
+            except Exception:
+                pass
+
         if not os.path.exists(src):
             print(f"[Icons] Source not found: {src}")
             continue
+
         try:
             img = Image.open(src).convert('RGBA')
-            img = img.resize((52, 52), Image.LANCZOS)
+            img = img.resize((42, 42), Image.LANCZOS)
             img.save(dst)
+            print(f"[Icons] Prepared: {dst}")
         except Exception as e:
             print(f"[Icons] Failed: {e}")
 
@@ -439,26 +445,18 @@ def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
     has_yt = os.path.exists(YOUTUBE_ICON)
     has_tt = os.path.exists(TIKTOK_ICON)
 
-    ICON_W, ICON_H = 42, 42
-    PADDING = 22
-    GAP = 16
+    ICON_W, ICON_H = 36, 36
+    PADDING = 18
+    GAP = 12
 
-    def pulse(period, offset, lo=0.78, hi=1.0):
-        amp = (hi - lo) / 2
-        mid = (hi + lo) / 2
-        return f"{mid}+{amp}*sin(6.2832/{period}*t+{offset})"
+    icon_x = f"W-{ICON_W + PADDING + 120}"
+    yt_icon_y = f"H-{ICON_H * 2 + GAP + PADDING}"
+    tt_icon_y = f"H-{ICON_H + PADDING}"
 
-    yt_alpha = pulse(3.0, 0.0)
-    tt_alpha = pulse(3.0, 3.14)
-
-    icon_x = f"W-{ICON_W + PADDING + 150}"
-    yt_icon_y = f"H-{ICON_H * 2 + GAP + PADDING + 6}"
-    tt_icon_y = f"H-{ICON_H + PADDING - 2}"
-
-    yt_text_x = f"W-{PADDING + 102}"
+    yt_text_x = f"W-{PADDING + 92}"
     tt_text_x = yt_text_x
-    yt_text_y = f"H-{ICON_H * 2 + GAP + PADDING + 8}"
-    tt_text_y = f"H-{ICON_H + PADDING + 1}"
+    yt_text_y = f"H-{ICON_H * 2 + GAP + PADDING + 4}"
+    tt_text_y = f"H-{ICON_H + PADDING + 4}"
 
     overlay_segs = []
     icon_paths = []
@@ -467,16 +465,12 @@ def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
     if has_yt:
         icon_paths.append(YOUTUBE_ICON)
         idx = base + len(icon_paths) - 1
-        overlay_segs.append(
-            f"[{idx}:v]scale={ICON_W}:{ICON_H},format=rgba,colorchannelmixer=aa={yt_alpha}[yt_icon]"
-        )
+        overlay_segs.append(f"[{idx}:v]scale={ICON_W}:{ICON_H},format=rgba[yt_icon]")
 
     if has_tt:
         icon_paths.append(TIKTOK_ICON)
         idx = base + len(icon_paths) - 1
-        overlay_segs.append(
-            f"[{idx}:v]scale={ICON_W}:{ICON_H},format=rgba,colorchannelmixer=aa={tt_alpha}[tt_icon]"
-        )
+        overlay_segs.append(f"[{idx}:v]scale={ICON_W}:{ICON_H},format=rgba[tt_icon]")
 
     return {
         "has_yt": has_yt,
@@ -490,8 +484,6 @@ def build_social_badges_info(yt_channel="sorlune", tt_channel="sorlune08"):
         "tt_text_x": tt_text_x,
         "yt_text_y": yt_text_y,
         "tt_text_y": tt_text_y,
-        "yt_alpha": yt_alpha,
-        "tt_alpha": tt_alpha,
         "yt_channel": yt_channel,
         "tt_channel": tt_channel,
     }
@@ -502,20 +494,20 @@ def build_social_text_filter(font, info):
 
     if info["has_yt"]:
         parts.append(
-            f"drawtext=fontfile={font}:text='{ffmpeg_escape(info['yt_channel'])}':"
-            f"fontsize=24:fontcolor=white@{info['yt_alpha']}:"
+            f"drawtext=fontfile='{font}':text='{ffmpeg_escape(info['yt_channel'])}':"
+            f"fontsize=24:fontcolor=white:"
             f"borderw=3:bordercolor=black@0.95:"
-            f"shadowcolor=0xFFD700@0.90:shadowx=0:shadowy=0:"
-            f"x={info['yt_text_x']}:y={info['yt_text_y']}"
+            f"x={info['yt_text_x']}:y={info['yt_text_y']}:"
+            f"enable='between(t,0,99999)'"
         )
 
     if info["has_tt"]:
         parts.append(
-            f"drawtext=fontfile={font}:text='{ffmpeg_escape(info['tt_channel'])}':"
-            f"fontsize=24:fontcolor=white@{info['tt_alpha']}:"
+            f"drawtext=fontfile='{font}':text='{ffmpeg_escape(info['tt_channel'])}':"
+            f"fontsize=24:fontcolor=white:"
             f"borderw=3:bordercolor=black@0.95:"
-            f"shadowcolor=0x00F2EA@0.85:shadowx=0:shadowy=0:"
-            f"x={info['tt_text_x']}:y={info['tt_text_y']}"
+            f"x={info['tt_text_x']}:y={info['tt_text_y']}:"
+            f"enable='between(t,0,99999)'"
         )
 
     return ",".join(parts) if parts else ""
