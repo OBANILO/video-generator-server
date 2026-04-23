@@ -214,7 +214,7 @@ def build_ffmpeg_command(image_path, audio_path, output_path, duration, fps, fon
     if karaoke_filter: vf_parts.append(karaoke_filter)
     vf_parts.append(eq_filter)
     vf_chain=",".join(vf_parts)
-    return ['ffmpeg','-y','-loop','1','-i',image_path,'-i',audio_path,'-vf',vf_chain,'-c:v','libx264','-preset','ultrafast','-crf','20','-c:a','aac','-b:a','192k','-pix_fmt','yuv420p','-movflags','+faststart','-t',str(duration),'-shortest',output_path]
+    return ['ffmpeg','-y','-loop','1','-i',image_path,'-i',audio_path,'-vf',vf_chain,'-c:v','libx264','-preset','ultrafast','-crf','20','-c:a','aac','-b:a','192k','-pix_fmt','yuv420p','-t',str(duration),'-shortest',output_path]
 
 def generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segments=None, artist_name="SORLUNE"):
     try:
@@ -222,20 +222,11 @@ def generate_video_job(job_id, image_path, audio_path, output_path, lyrics_segme
         duration=get_audio_duration(audio_path); font=get_best_font(); font_italic=get_italic_font(); lyrics_font=get_lyrics_font()
         cmd=build_ffmpeg_command(image_path,audio_path,output_path,duration,25,font,font_italic,lyrics_font=lyrics_font,lyrics_segments=lyrics_segments,artist_name=artist_name)
         proc=subprocess.run(cmd,capture_output=True,text=True,timeout=3600)
-       if proc.returncode==0 and os.path.exists(output_path) and os.path.getsize(output_path) > 100000:
-            verify = subprocess.run(['ffprobe','-v','error','-show_streams',output_path],capture_output=True,text=True,timeout=30)
-            if verify.returncode == 0 and 'codec_type=video' in verify.stdout:
-                jobs[job_id]['status']='completed'
-                jobs[job_id]['video_url']=f"/videos/{job_id}/{job_id}.mp4"
-                print(f"[Video OK] {os.path.getsize(output_path)} bytes")
-            else:
-                jobs[job_id]['status']='error'
-                jobs[job_id]['error']=f"Invalid MP4: {verify.stderr[-500:]}"
-                print(f"[Verify FAILED]\n{verify.stderr}")
+        if proc.returncode==0 and os.path.exists(output_path):
+            jobs[job_id]['status']='completed'; jobs[job_id]['video_url']=f"/videos/{job_id}/{job_id}.mp4"
         else:
-            jobs[job_id]['status']='error'
-            jobs[job_id]['error']=proc.stderr[-3000:] if proc.stderr else "ffmpeg failed"
-            print(f"[FFmpeg ERROR returncode={proc.returncode}]\n{proc.stderr[-3000:]}")
+            jobs[job_id]['status']='error'; jobs[job_id]['error']=proc.stderr[-3000:]
+            print(f"[FFmpeg ERROR]\n{proc.stderr[-3000:]}")
     except Exception as e:
         jobs[job_id]['status']='error'; jobs[job_id]['error']=str(e)
 
@@ -328,3 +319,4 @@ def health():
 
 if __name__=='__main__':
     app.run(host='0.0.0.0',port=int(os.environ.get('PORT',8080)),debug=False)
+
